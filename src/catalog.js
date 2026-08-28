@@ -43,7 +43,10 @@ export const DISCORD_COMMANDS = Object.freeze([
     name: "approve",
     description: "管理者用：PayPay受取確認後に配布を有効化します",
     type: 1,
-    options: [{ name: "order", description: "注文番号", type: 3, required: true }],
+    options: [
+      { name: "order", description: "注文番号", type: 3, required: true },
+      { name: "amount", description: "PayPayで実際に受け取った金額（円）", type: 4, required: true, min_value: 1 },
+    ],
   },
   {
     name: "cancel",

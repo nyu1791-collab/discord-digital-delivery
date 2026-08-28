@@ -194,6 +194,11 @@ async function approveOrder(interaction, env) {
   if (!order) return ephemeral("注文が見つかりません。");
   if (order.status !== "awaiting_manual_acceptance") return ephemeral(`この注文は ${order.status} 状態です。`);
   if (!order.claimed_at) return ephemeral("先に /claim で受取リンクを確認し、PayPayで受取完了を確認してください。");
+  const product = findProduct(order.product_id);
+  const confirmedAmount = Number(optionValue(interaction, "amount"));
+  if (!product || !Number.isSafeInteger(confirmedAmount) || confirmedAmount !== product.priceYen) {
+    return ephemeral(`金額が一致しないため承認を停止しました。PayPayの受取額を確認し、${formatYen(product?.priceYen ?? 0)}ちょうどの場合だけ再実行してください。`);
+  }
   if (Date.parse(order.expires_at) <= Date.now()) {
     await expireOrder(env, order.id);
     return ephemeral("確認期限が切れています。承認できません。");
