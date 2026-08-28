@@ -114,7 +114,7 @@ async function handlePurchaseCommand(interaction, env, ctx, command) {
   if (command === "panel") {
     const denied = requireOwner(interaction, env);
     if (denied) return denied;
-    return createPurchasePanel(interaction, env);
+    return deferPurchasePanel(interaction, env, ctx);
   }
   return deferProductSelector(interaction, env, ctx);
 }
@@ -208,6 +208,28 @@ async function createPurchasePanel(interaction, env) {
       components: [actionRow({ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" })],
     },
   });
+}
+
+function deferPurchasePanel(interaction, env, ctx) {
+  if (!ctx?.waitUntil) return createPurchasePanel(interaction, env);
+  ctx.waitUntil((async () => {
+    try {
+      const response = await createPurchasePanel(interaction, env);
+      await editOriginalInteractionResponse(interaction, env, response);
+    } catch (error) {
+      console.error("Deferred purchase panel failed", error instanceof Error ? error.message : "unknown error");
+      try {
+        await editOriginalInteractionResponse(
+          interaction,
+          env,
+          ephemeral("販売パネルを表示できませんでした。もう一度 /panel を実行してください。"),
+        );
+      } catch (editError) {
+        console.error("Deferred purchase panel error update failed", editError instanceof Error ? editError.message : "unknown error");
+      }
+    }
+  })());
+  return json({ type: 5 });
 }
 
 async function editOriginalInteractionResponse(interaction, env, response) {
@@ -696,7 +718,7 @@ async function verifyDiscordInteraction(request, env) {
   if (!/^[0-9a-f]{128}$/i.test(signatureHex) || !/^\d{10,13}$/.test(timestamp)) throw new Error("Missing Discord signature");
   if (!isFreshDiscordTimestamp(timestamp)) throw new Error("Stale Discord signature");
   const body = await request.text();
-  const key = await crypto.subtle.importKey("raw", hexToBytes(env.DISCORD_APPLICATION_PUBLIC_KEY), { name: "Ed25519" }, false, ["verify"]);
+  const key = await getDiscordPublicKey(env);
   const valid = await crypto.subtle.verify(
     "Ed25519",
     key,
@@ -705,6 +727,21 @@ async function verifyDiscordInteraction(request, env) {
   );
   if (!valid) throw new Error("Invalid Discord signature");
   return JSON.parse(body);
+}
+
+let discordPublicKeyPromise;
+
+function getDiscordPublicKey(env) {
+  if (!discordPublicKeyPromise) {
+    discordPublicKeyPromise = crypto.subtle.importKey(
+      "raw",
+      hexToBytes(env.DISCORD_APPLICATION_PUBLIC_KEY),
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
+  }
+  return discordPublicKeyPromise;
 }
 
 function extractPayPayReceiveLink(input) {
