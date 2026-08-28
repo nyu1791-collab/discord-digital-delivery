@@ -58,7 +58,23 @@ async function handleInteraction(interaction, env, ctx) {
     return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
   }
 
-  if (!await markInteractionAsNew(interaction, env)) {
+  const commandName = interaction.type === DISCORD_APPLICATION_COMMAND
+    ? String(interaction.data?.name ?? "")
+    : "";
+  const componentId = interaction.type === DISCORD_MESSAGE_COMPONENT
+    ? String(interaction.data?.custom_id ?? "")
+    : "";
+  // Read-only UI interactions must answer within Discord's three-second deadline.
+  // They do not create orders or deliveries, so waiting on D1 deduplication here
+  // only adds latency and can produce "application did not respond".
+  const readOnlyInteraction =
+    (interaction.type === DISCORD_APPLICATION_COMMAND &&
+      ["panel", "buy", "shop"].includes(commandName)) ||
+    (interaction.type === DISCORD_MESSAGE_COMPONENT &&
+      (componentId === "purchase-panel" ||
+        componentId.startsWith("product-select:") ||
+        componentId.startsWith("products-page:")));
+  if (!readOnlyInteraction && !await markInteractionAsNew(interaction, env)) {
     return ephemeral("この操作はすでに受け付け済みです。重複して注文・配布されることはありません。");
   }
 
