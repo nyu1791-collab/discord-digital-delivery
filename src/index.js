@@ -353,7 +353,7 @@ async function handleDownload(request, env, url) {
   await auditStatement(env, order.id, null, "download_served", { requestMethod: request.method }).run();
   const headers = new Headers();
   headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
-  headers.set("Content-Disposition", `attachment; filename=\"${safeFilename(terms.downloadName)}\"`);
+  headers.set("Content-Disposition", contentDispositionAttachment(terms.downloadName));
   headers.set("Cache-Control", "private, no-store, max-age=0");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "no-referrer");
@@ -692,6 +692,26 @@ function safeFilename(value) {
   return String(value).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "download";
 }
 
+// Keep the seller's original display name while removing characters that could
+// inject headers or turn the name into a path. The ASCII fallback is for older
+// clients; filename* carries the correct UTF-8 name for modern clients.
+function contentDispositionAttachment(value) {
+  const original = String(value ?? "download")
+    .normalize("NFC")
+    .replace(/[\\/\u0000-\u001F\u007F]/g, "_")
+    .trim()
+    .slice(0, 180) || "download";
+  const asciiFallback = original
+    .replace(/[^\x20-\x7E]/g, "_")
+    .replace(/["\\]/g, "_")
+    .replace(/\s+/g, " ")
+    .slice(0, 180) || "download";
+  const encoded = encodeURIComponent(original).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
+}
+
 function formatYen(value) {
   const amount = Number(value);
   return Number.isSafeInteger(amount) && amount >= 0 ? `${amount.toLocaleString("ja-JP")}円` : "金額不明";
@@ -779,5 +799,7 @@ export const __testables = Object.freeze({
   isUuid,
   normalizeDeliveryTerms,
   safeFilename,
+  contentDispositionAttachment,
   timingSafeEqual,
 });
+
