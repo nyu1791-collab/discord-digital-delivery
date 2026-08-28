@@ -218,18 +218,19 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-async function handleComponentInteraction(interaction, env) {
+async function handleComponentInteraction(interaction, env, ctx) {
   const customId = String(interaction.data?.custom_id ?? "");
-  if (customId === "purchase-panel") return deferProductSelector(interaction, env, { waitUntil: () => {} });
-
-  const customId = String(interaction.data?.custom_id ?? "");
+  if (customId === "purchase-panel") {
+    if (!isAllowedSalesChannel(interaction, env)) return ephemeral("購入は指定された販売チャンネルでのみ利用できます。");
+    return deferProductSelector(interaction, env, ctx);
+  }
   if (customId.startsWith("product-select:")) {
     const productId = interaction.data?.values?.[0] ?? "";
     return openPaymentModal(interaction, env, productId);
   }
   if (customId.startsWith("products-page:")) {
     const page = Number(customId.slice("products-page:".length));
-    return openProductSelector(interaction, env, page);
+    return deferProductSelector(interaction, env, ctx, page, 6);
   }
   return ephemeral("この操作は期限切れです。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
 }
