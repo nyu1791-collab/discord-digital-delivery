@@ -1,6 +1,8 @@
 name: deploy-discord-digital-delivery
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
