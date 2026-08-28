@@ -85,6 +85,15 @@ jobs:
           test -n "$DISCORD_BOT_TOKEN"
           node ./scripts/register-commands.mjs
 
+      - name: Configure Discord interaction verification key
+        if: ${{ secrets.DISCORD_APPLICATION_PUBLIC_KEY != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DISCORD_APPLICATION_PUBLIC_KEY: ${{ secrets.DISCORD_APPLICATION_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DISCORD_APPLICATION_PUBLIC_KEY" | npx --yes wrangler@4.38.0 secret put DISCORD_APPLICATION_PUBLIC_KEY --config=./wrangler.generated.toml
+
       - name: Verify public health endpoint
         run: |
           set -euo pipefail
