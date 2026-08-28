@@ -75,6 +75,16 @@ jobs:
           npx --yes wrangler@4.38.0 d1 execute discord-digital-delivery --remote --file=./migrations/0001_orders.sql --config=./wrangler.generated.toml
           npx --yes wrangler@4.38.0 deploy --config=./wrangler.generated.toml
 
+      - name: Register Discord slash commands
+        env:
+          DISCORD_APPLICATION_ID: "1542748509034389626"
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_GUILD_ID: "1542767815897915452"
+        run: |
+          set -euo pipefail
+          test -n "$DISCORD_BOT_TOKEN"
+          node ./scripts/register-commands.mjs
+
       - name: Verify public health endpoint
         run: |
           set -euo pipefail
