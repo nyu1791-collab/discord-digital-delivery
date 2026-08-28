@@ -185,22 +185,13 @@ async function openPaymentModal(interaction, env, selectedProductId = null) {
 }
 
 async function createPurchasePanel(interaction, env) {
-  const channelId = env.SALES_CHANNEL_ID;
-  const applicationId = interaction.application_id;
-  const token = interaction.token;
-  if (!channelId || !applicationId || !token) return ephemeral("販売パネルを作成できません。");
-  const response = await discordApi(env, `/channels/${channelId}/messages`, {
-    method: "POST",
-    body: JSON.stringify({
+  return json({
+    type: RESPONSE_CHANNEL_MESSAGE,
+    data: {
       content: "購入する場合は、下の「商品を選ぶ」ボタンを押してください。",
       components: [actionRow({ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" })],
-    }),
+    },
   });
-  if (!response.ok) {
-    console.error("Purchase panel creation failed", response.status);
-    return ephemeral("購入パネルを作成できませんでした。Botに販売チャンネルへの送信権限があるか確認してください。");
-  }
-  return ephemeral("購入パネルを販売チャンネルに設置しました。以後はボタンから購入できます。");
 }
 
 async function editOriginalInteractionResponse(interaction, env, response) {
