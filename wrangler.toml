@@ -8,6 +8,8 @@ PUBLIC_BASE_URL = "https://discord-digital-deriver.n-yu1791.workers.dev"
 OWNER_DISCORD_ID = "1368150499282391093"
 SALES_GUILD_ID = "1542767815897915452"
 SALES_CHANNEL_ID = "1542767816371867690"
+# Only videos uploaded under this folder are listed as saleable products.
+PRODUCTS_PREFIX = "products/ロリ/"
 
 [[d1_databases]]
 binding = "DB"
