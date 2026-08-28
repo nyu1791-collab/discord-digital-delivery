@@ -42,7 +42,9 @@ export default {
     } catch (error) {
       // Never log a submitted receive-link or any Discord interaction body.
       console.error("Interaction rejected or failed", error instanceof Error ? error.message : "unknown error");
-      return new Response("Bad request", { status: 400 });
+      // Always return a valid Discord interaction response. A plain HTTP 400 makes
+      // Discord show "application did not respond" and hides the actionable error.
+      return ephemeral("処理中にエラーが発生しました。数秒後に /buy をもう一度お試しください。");
     }
   },
 };
