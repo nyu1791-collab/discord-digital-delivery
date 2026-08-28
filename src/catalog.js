@@ -55,6 +55,17 @@ export const DISCORD_COMMANDS = Object.freeze([
     options: [{ name: "order", description: "注文番号", type: 3, required: true }],
   },
   {
+    name: "pending",
+    description: "管理者用：未処理注文の一覧を表示します",
+    type: 1,
+  },
+  {
+    name: "status",
+    description: "自分の注文状況を表示します",
+    type: 1,
+    options: [{ name: "order", description: "あなたの注文番号", type: 3, required: true }],
+  },
+  {
     name: "download",
     description: "承認済み商品の受取リンクを表示します",
     type: 1,
