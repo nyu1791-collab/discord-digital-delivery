@@ -1,0 +1,25 @@
+name = "discord-digital-deriver"
+main = "src/index.js"
+compatibility_date = "2026-08-28"
+
+# Set this to the HTTPS URL assigned after the first Worker deployment.
+[vars]
+PUBLIC_BASE_URL = "https://discord-digital-deriver.n-yu1791.workers.dev"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "discord-digital-delivery"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "PRODUCT_ASSETS"
+bucket_name = "discord-digital-products"
+
+# Secrets: never put their values in this file, GitHub, or Discord.
+# wrangler secret put DISCORD_APPLICATION_PUBLIC_KEY
+# wrangler secret put DISCORD_BOT_TOKEN
+# wrangler secret put OWNER_DISCORD_ID
+# wrangler secret put SALES_GUILD_ID
+# wrangler secret put SALES_CHANNEL_ID
+# wrangler secret put PAYPAY_LINK_ENCRYPTION_KEY
+# wrangler secret put PRODUCT_DOWNLOAD_SIGNING_KEY

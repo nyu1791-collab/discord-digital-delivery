@@ -1,0 +1,10 @@
+{
+  "name": "discord-paypay-link-delivery",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/catalog.js && node --check scripts/register-commands.mjs",
+    "register-commands": "node scripts/register-commands.mjs"
+  }
+}
