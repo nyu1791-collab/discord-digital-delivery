@@ -49,7 +49,7 @@ export const DISCORD_COMMANDS = Object.freeze([
     name: "buy",
     description: "商品を選び、PayPay受取リンクを送信します",
     type: 1,
-
+  },
   {
     name: "claim",
     description: "管理者用：受取リンクを一度だけ表示します",
