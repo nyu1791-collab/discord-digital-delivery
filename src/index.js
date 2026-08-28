@@ -42,8 +42,8 @@ async function handleInteraction(interaction, env) {
     return json({ type: RESPONSE_PONG });
   }
 
-  if (!isAllowedSalesContext(interaction, env)) {
-    return ephemeral("この販売ボットは指定された販売チャンネルでのみ利用できます。");
+  if (!isAllowedGuildContext(interaction, env)) {
+    return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
   }
 
   if (interaction.type === DISCORD_APPLICATION_COMMAND) {
@@ -59,6 +59,11 @@ async function handleInteraction(interaction, env) {
 
 async function handleCommand(interaction, env) {
   const command = interaction.data?.name;
+  if (command === "buy" || command === "download") {
+    if (!isAllowedSalesChannel(interaction, env)) {
+      return ephemeral("購入・受取は指定された販売チャンネルでのみ利用できます。");
+    }
+  }
   if (command === "buy") return openPaymentModal(interaction);
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
@@ -154,6 +159,9 @@ async function claimPaymentLink(interaction, env) {
   if (Date.parse(order.expires_at) <= Date.now()) {
     await expireOrder(env, order.id);
     return ephemeral("この注文の確認時間（30分）が切れました。購入者に新しい受取リンクを送ってもらってください。");
+  }
+  if (order.claimed_at) {
+    return ephemeral("この注文の受取リンクはすでに管理者へ一度だけ表示しました。PayPayの受取完了を確認できた場合は /approve、やり直す場合は /cancel を実行してください。");
   }
 
   const ownerId = interaction.member?.user?.id ?? interaction.user?.id;
@@ -313,8 +321,11 @@ function requireOwner(interaction, env) {
   return userId === env.OWNER_DISCORD_ID ? null : ephemeral("このコマンドは管理者専用です。");
 }
 
-function isAllowedSalesContext(interaction, env) {
-  if (!env.SALES_GUILD_ID || interaction.guild_id !== env.SALES_GUILD_ID) return false;
+function isAllowedGuildContext(interaction, env) {
+  return Boolean(env.SALES_GUILD_ID) && interaction.guild_id === env.SALES_GUILD_ID;
+}
+
+function isAllowedSalesChannel(interaction, env) {
   return !env.SALES_CHANNEL_ID || interaction.channel_id === env.SALES_CHANNEL_ID;
 }
 
