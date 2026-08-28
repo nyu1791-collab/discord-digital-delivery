@@ -17,7 +17,7 @@ const PROCESSED_INTERACTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/healthz") {
@@ -38,18 +38,18 @@ export default {
 
     try {
       const interaction = await verifyDiscordInteraction(request, env);
-      return handleInteraction(interaction, env);
+      return handleInteraction(interaction, env, ctx);
     } catch (error) {
       // Never log a submitted receive-link or any Discord interaction body.
       console.error("Interaction rejected or failed", error instanceof Error ? error.message : "unknown error");
       // Always return a valid Discord interaction response. A plain HTTP 400 makes
       // Discord show "application did not respond" and hides the actionable error.
-      return ephemeral("処理中にエラーが発生しました。数秒後に /buy をもう一度お試しください。");
+      return ephemeral("処理中にエラーが発生しました。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
     }
   },
 };
 
-async function handleInteraction(interaction, env) {
+async function handleInteraction(interaction, env, ctx) {
   if (interaction.type === DISCORD_PING) {
     return json({ type: RESPONSE_PONG });
   }
@@ -63,7 +63,7 @@ async function handleInteraction(interaction, env) {
   }
 
   if (interaction.type === DISCORD_APPLICATION_COMMAND) {
-    return handleCommand(interaction, env);
+    return handleCommand(interaction, env, ctx);
   }
 
   if (interaction.type === DISCORD_MODAL_SUBMIT) {
@@ -71,20 +71,20 @@ async function handleInteraction(interaction, env) {
   }
 
   if (interaction.type === DISCORD_MESSAGE_COMPONENT) {
-    return handleComponentInteraction(interaction, env);
+    return handleComponentInteraction(interaction, env, ctx);
   }
 
   return ephemeral("この操作には対応していません。");
 }
 
-async function handleCommand(interaction, env) {
+async function handleCommand(interaction, env, ctx) {
   const command = interaction.data?.name;
   if (command === "buy" || command === "download") {
     if (!isAllowedSalesChannel(interaction, env)) {
       return ephemeral("購入・受取は指定された販売チャンネルでのみ利用できます。");
     }
   }
-  if (command === "buy") return openProductSelector(interaction, env);
+  if (command === "buy" || command === "shop" || command === "panel") return handlePurchaseCommand(interaction, env, ctx, command);
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
   if (command === "cancel") return cancelOrder(interaction, env);
@@ -92,6 +92,29 @@ async function handleCommand(interaction, env) {
   if (command === "status") return showOrderStatus(interaction, env);
   if (command === "download") return createDownloadLink(interaction, env);
   return ephemeral("未知のコマンドです。");
+}
+
+async function handlePurchaseCommand(interaction, env, ctx, command) {
+  if (command === "panel") {
+    const denied = requireOwner(interaction, env);
+    if (denied) return denied;
+    return createPurchasePanel(interaction, env);
+  }
+  return deferProductSelector(interaction, env, ctx);
+}
+
+function deferProductSelector(interaction, env, ctx, requestedPage = 0, responseType = 5) {
+  if (!ctx?.waitUntil) return openProductSelector(interaction, env);
+  ctx.waitUntil((async () => {
+    try {
+      const response = await openProductSelector(interaction, env, requestedPage);
+      await editOriginalInteractionResponse(interaction, env, response);
+    } catch (error) {
+      console.error("Deferred product selector failed", error instanceof Error ? error.message : "unknown error");
+      await editOriginalInteractionResponse(interaction, env, ephemeral("商品一覧を読み込めませんでした。もう一度お試しください。"));
+    }
+  })());
+  return responseType === 6 ? json({ type: 6 }) : json({ type: 5, data: { flags: EPHEMERAL } });
 }
 
 async function openProductSelector(interaction, env, requestedPage = 0) {
@@ -161,7 +184,44 @@ async function openPaymentModal(interaction, env, selectedProductId = null) {
   });
 }
 
+async function createPurchasePanel(interaction, env) {
+  const channelId = env.SALES_CHANNEL_ID;
+  const applicationId = interaction.application_id;
+  const token = interaction.token;
+  if (!channelId || !applicationId || !token) return ephemeral("販売パネルを作成できません。");
+  const response = await discordApi(env, `/channels/${channelId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      content: "購入する場合は、下の「商品を選ぶ」ボタンを押してください。",
+      components: [actionRow({ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" })],
+    }),
+  });
+  if (!response.ok) {
+    console.error("Purchase panel creation failed", response.status);
+    return ephemeral("購入パネルを作成できませんでした。Botに販売チャンネルへの送信権限があるか確認してください。");
+  }
+  return ephemeral("購入パネルを販売チャンネルに設置しました。以後はボタンから購入できます。");
+}
+
+async function editOriginalInteractionResponse(interaction, env, response) {
+  const data = response?.data ?? {};
+  await discordApi(env, `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+async function discordApi(env, path, init = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
+  headers.set("Content-Type", "application/json");
+  return fetch("https://discord.com/api/v10" + path, { ...init, headers });
+}
+
 async function handleComponentInteraction(interaction, env) {
+  const customId = String(interaction.data?.custom_id ?? "");
+  if (customId === "purchase-panel") return deferProductSelector(interaction, env, { waitUntil: () => {} });
+
   const customId = String(interaction.data?.custom_id ?? "");
   if (customId.startsWith("product-select:")) {
     const productId = interaction.data?.values?.[0] ?? "";
@@ -171,7 +231,7 @@ async function handleComponentInteraction(interaction, env) {
     const page = Number(customId.slice("products-page:".length));
     return openProductSelector(interaction, env, page);
   }
-  return ephemeral("この操作は期限切れです。/buy からもう一度選んでください。");
+  return ephemeral("この操作は期限切れです。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
 }
 
 async function handlePaymentLinkSubmission(interaction, env) {
