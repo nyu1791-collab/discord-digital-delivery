@@ -1,8 +1,10 @@
-import { PRODUCTS, findProduct } from "./catalog.js";
+import { PRODUCTS, findProduct, isVideoObjectKey, productFromObject } from "./catalog.js";
 
 const DISCORD_PING = 1;
 const DISCORD_APPLICATION_COMMAND = 2;
 const DISCORD_MODAL_SUBMIT = 5;
+const DISCORD_MESSAGE_COMPONENT = 3;
+const PRODUCT_PAGE_SIZE = 25;
 const RESPONSE_PONG = 1;
 const RESPONSE_CHANNEL_MESSAGE = 4;
 const RESPONSE_MODAL = 9;
@@ -66,6 +68,10 @@ async function handleInteraction(interaction, env) {
     return handlePaymentLinkSubmission(interaction, env);
   }
 
+  if (interaction.type === DISCORD_MESSAGE_COMPONENT) {
+    return handleComponentInteraction(interaction, env);
+  }
+
   return ephemeral("この操作には対応していません。");
 }
 
@@ -76,7 +82,7 @@ async function handleCommand(interaction, env) {
       return ephemeral("購入・受取は指定された販売チャンネルでのみ利用できます。");
     }
   }
-  if (command === "buy") return openPaymentModal(interaction);
+  if (command === "buy") return openProductSelector(interaction, env);
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
   if (command === "cancel") return cancelOrder(interaction, env);
@@ -86,9 +92,51 @@ async function handleCommand(interaction, env) {
   return ephemeral("未知のコマンドです。");
 }
 
-function openPaymentModal(interaction) {
-  const productId = optionValue(interaction, "product");
-  const product = findProduct(productId);
+async function openProductSelector(interaction, env, requestedPage = 0) {
+  let products;
+  try {
+    products = await listR2Products(env);
+  } catch (error) {
+    console.error("Product listing failed", error instanceof Error ? error.message : "unknown error");
+    return ephemeral("商品一覧を読み込めませんでした。しばらく待ってから再度お試しください。");
+  }
+  if (!products.length) return ephemeral("現在販売できる動画がありません。管理者へ連絡してください。");
+  const pageCount = Math.max(1, Math.ceil(products.length / PRODUCT_PAGE_SIZE));
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
+  const pageProducts = products.slice(page * PRODUCT_PAGE_SIZE, (page + 1) * PRODUCT_PAGE_SIZE);
+  const options = pageProducts.map((product) => ({
+    label: truncateDiscordLabel(product.title),
+    value: product.id,
+    description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
+  }));
+  const components = [actionRow({
+    type: 3,
+    custom_id: "product-select:" + page,
+    placeholder: "商品を選択（" + (page + 1) + "/" + pageCount + "）",
+    min_values: 1,
+    max_values: 1,
+    options,
+  })];
+  if (pageCount > 1) {
+    components.push(actionRow({
+      type: 1,
+      components: [
+        { type: 2, style: 2, label: "最初", custom_id: "products-page:0", disabled: page === 0 },
+        { type: 2, style: 2, label: "前へ", custom_id: "products-page:" + (page - 1), disabled: page === 0 },
+        { type: 2, style: 2, label: "次へ（" + (page + 1) + "/" + pageCount + "）", custom_id: "products-page:" + (page + 1), disabled: page >= pageCount - 1 },
+        { type: 2, style: 2, label: "最後", custom_id: "products-page:" + (pageCount - 1), disabled: page >= pageCount - 1 },
+      ],
+    }));
+  }
+  return ephemeralComponentMessage(
+    "販売動画一覧（全" + products.length + "本・各" + formatYen(2000) + "）から選択してください。",
+    components,
+  );
+}
+
+async function openPaymentModal(interaction, env, selectedProductId = null) {
+  const productId = selectedProductId ?? optionValue(interaction, "product");
+  const product = await runtimeProductById(env, productId);
   if (!product) return ephemeral("商品が見つかりません。商品一覧からもう一度選んでください。");
 
   return json({
@@ -111,13 +159,26 @@ function openPaymentModal(interaction) {
   });
 }
 
+async function handleComponentInteraction(interaction, env) {
+  const customId = String(interaction.data?.custom_id ?? "");
+  if (customId.startsWith("product-select:")) {
+    const productId = interaction.data?.values?.[0] ?? "";
+    return openPaymentModal(interaction, env, productId);
+  }
+  if (customId.startsWith("products-page:")) {
+    const page = Number(customId.slice("products-page:".length));
+    return openProductSelector(interaction, env, page);
+  }
+  return ephemeral("この操作は期限切れです。/buy からもう一度選んでください。");
+}
+
 async function handlePaymentLinkSubmission(interaction, env) {
   const customId = interaction.data?.custom_id ?? "";
   const productId = customId.startsWith("paypay-receive-link:")
     ? customId.slice("paypay-receive-link:".length)
     : "";
-  const product = findProduct(productId);
-  if (!product) return ephemeral("商品情報を確認できませんでした。もう一度 /buy からやり直してください。");
+  const product = await runtimeProductById(env, productId);
+  if (!product) return ephemeral("商品情報を確認できませんでした。商品一覧からもう一度 /buy からやり直してください。");
 
   const submitted = modalValue(interaction, "paypay_receive_link");
   const receiveLink = extractPayPayReceiveLink(submitted);
@@ -164,6 +225,53 @@ async function handlePaymentLinkSubmission(interaction, env) {
       `確認期限：30分\n管理者がPayPayで受取確認後、/download order:${order.code} で受け取れます。\n` +
       "重要：リンクのパスワード・PayPayの暗証番号・ログイン情報は送らないでください。",
   );
+}
+
+async function listR2Products(env) {
+  const prefix = typeof env.PRODUCTS_PREFIX === "string" && env.PRODUCTS_PREFIX
+    ? env.PRODUCTS_PREFIX
+    : "products/";
+  const products = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const listed = await env.PRODUCT_ASSETS.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+    for (const object of listed.objects ?? []) {
+      if (!isVideoObjectKey(object.key)) continue;
+      const product = productFromObject(object, 2000, 3);
+      if (product) products.push(product);
+    }
+    if (!listed.truncated || !listed.cursor) break;
+    cursor = listed.cursor;
+  }
+  const unique = new Map(products.map((product) => [product.id, product]));
+  return [...unique.values()].sort((left, right) => left.objectKey.localeCompare(right.objectKey, "ja"));
+}
+
+async function runtimeProductById(env, productId) {
+  let dynamic = [];
+  try {
+    dynamic = await listR2Products(env);
+  } catch (error) {
+    console.error("Product lookup failed", error instanceof Error ? error.message : "unknown error");
+  }
+  const product = dynamic.find((candidate) => candidate.id === productId);
+  if (product) return product;
+  const legacy = findProduct(productId);
+  if (!legacy) return null;
+  const object = await env.PRODUCT_ASSETS.head(legacy.objectKey);
+  return object ? legacy : null;
+}
+
+function truncateDiscordLabel(value) {
+  const text = String(value ?? "動画").replace(/[\r\n]/g, " ").trim() || "動画";
+  return text.length <= 100 ? text : text.slice(0, 97) + "...";
+}
+
+function ephemeralComponentMessage(content, components) {
+  return json({
+    type: RESPONSE_CHANNEL_MESSAGE,
+    data: { flags: EPHEMERAL, content, components },
+  });
 }
 
 async function claimPaymentLink(interaction, env) {
