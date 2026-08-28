@@ -1,4 +1,4 @@
-import { findProduct } from "./catalog.js";
+import { PRODUCTS, findProduct } from "./catalog.js";
 
 const DISCORD_PING = 1;
 const DISCORD_APPLICATION_COMMAND = 2;
@@ -16,6 +16,10 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/healthz") {
       return json({ ok: true });
+    }
+
+    if (request.method === "GET" && url.pathname === "/") {
+      return landingPage();
     }
 
     if (request.method === "GET" && url.pathname === "/download") {
@@ -456,4 +460,57 @@ function safeFilename(value) {
 
 function formatYen(value) {
   return `${Number(value).toLocaleString("ja-JP")}円`;
+}
+
+function landingPage() {
+  const products = PRODUCTS.map((product) => `
+    <article class="product">
+      <h2>${escapeHtml(product.title)}</h2>
+      <p class="price">${formatYen(product.priceYen)}</p>
+      <p>Discordの <code>/buy</code> から注文します。ダウンロード上限：${product.maxDownloads}回</p>
+    </article>`).join("");
+  const html = `<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Discordデジタル配布</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; background: #091728; color: #f4f8ff; }
+      main { max-width: 680px; margin: 0 auto; padding: 40px 20px 56px; }
+      .tag { color: #36d18b; font-weight: 700; }
+      h1 { font-size: clamp(2rem, 8vw, 3rem); margin: 8px 0; }
+      .lead { color: #b5c4da; line-height: 1.8; }
+      .product, .steps { border: 1px solid #29476d; border-radius: 16px; padding: 20px; margin: 16px 0; background: #0d2139; }
+      h2 { margin-top: 0; }
+      .price { color: #42d893; font-size: 1.8rem; font-weight: 800; margin: 8px 0; }
+      ol { padding-left: 1.4rem; line-height: 1.9; }
+      code { color: #a8d3ff; }
+      .notice { font-size: .9rem; color: #bdc9da; line-height: 1.7; }
+    </style>
+  </head>
+  <body><main>
+    <p class="tag">DISCORD DIGITAL DELIVERY</p>
+    <h1>デジタル商品 配布所</h1>
+    <p class="lead">購入と受取はDiscord内で完結します。PayPay受取リンクは、注文確認のためだけに暗号化して短時間保存され、管理者が手動で受取確認した後にダウンロードが有効になります。</p>
+    <section aria-label="商品一覧">${products}</section>
+    <section class="steps"><h2>購入方法</h2><ol><li>販売用Discordチャンネルで <code>/buy</code> を実行</li><li>PayPay受取リンクをフォームへ貼り付け</li><li>管理者の受取確認後、<code>/download</code> で動画を受け取る</li></ol></section>
+    <p class="notice">PayPayのログイン情報、暗証番号、受取リンクのパスワードは送らないでください。受取リンクの自動受取・自動承認は行いません。</p>
+  </main></body>
+</html>`;
+  return new Response(html, {
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Cache-Control": "no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY",
+    },
+  });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 }
