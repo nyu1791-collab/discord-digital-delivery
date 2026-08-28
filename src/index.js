@@ -79,7 +79,7 @@ async function handleInteraction(interaction, env, ctx) {
 
 async function handleCommand(interaction, env, ctx) {
   const command = interaction.data?.name;
-  if (command === "buy" || command === "download") {
+  if (command === "buy" || command === "shop" || command === "download") {
     if (!isAllowedSalesChannel(interaction, env)) {
       return ephemeral("購入・受取は指定された販売チャンネルでのみ利用できます。");
     }
