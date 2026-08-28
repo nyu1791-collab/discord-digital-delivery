@@ -196,10 +196,18 @@ async function createPurchasePanel(interaction, env) {
 
 async function editOriginalInteractionResponse(interaction, env, response) {
   const data = response?.data ?? {};
-  await discordApi(env, `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+  const url = "https://discord.com/api/v10/webhooks/" +
+    encodeURIComponent(String(interaction.application_id ?? "")) + "/" +
+    encodeURIComponent(String(interaction.token ?? "")) + "/messages/@original";
+  const result = await fetch(url, {
     method: "PATCH",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+  if (!result.ok) {
+    const detail = await result.text().catch(() => "");
+    throw new Error("Interaction response update failed (" + result.status + "): " + detail.slice(0, 300));
+  }
 }
 
 async function discordApi(env, path, init = {}) {
