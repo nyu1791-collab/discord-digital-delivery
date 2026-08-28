@@ -11,6 +11,35 @@ export const PRODUCTS = Object.freeze([
   }),
 ]);
 
+export function isVideoObjectKey(key) {
+  return typeof key === "string" && /\.(?:mp4|m4v|mov|webm|avi|mkv)$/iu.test(key);
+}
+
+export function productIdForObjectKey(objectKey) {
+  let hash = 2166136261;
+  for (const byte of new TextEncoder().encode(String(objectKey))) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `r2-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+export function productFromObject(object, priceYen = 2000, maxDownloads = 3) {
+  const objectKey = String(object?.key ?? "");
+  if (!isVideoObjectKey(objectKey) || !Number.isSafeInteger(priceYen) || priceYen < 1) return null;
+  const slash = objectKey.lastIndexOf("/");
+  const downloadName = objectKey.slice(slash + 1);
+  if (!downloadName) return null;
+  return Object.freeze({
+    id: productIdForObjectKey(objectKey),
+    title: downloadName,
+    priceYen,
+    objectKey,
+    downloadName,
+    maxDownloads,
+  });
+}
+
 export function findProduct(productId) {
   return PRODUCTS.find((product) => product.id === productId) ?? null;
 }
@@ -20,19 +49,7 @@ export const DISCORD_COMMANDS = Object.freeze([
     name: "buy",
     description: "商品を選び、PayPay受取リンクを送信します",
     type: 1,
-    options: [
-      {
-        name: "product",
-        description: "購入する商品",
-        type: 3,
-        required: true,
-        choices: PRODUCTS.map((product) => ({
-          name: `${product.title}（${product.priceYen.toLocaleString("ja-JP")}円）`,
-          value: product.id,
-        })),
-      },
-    ],
-  },
+
   {
     name: "claim",
     description: "管理者用：受取リンクを一度だけ表示します",
