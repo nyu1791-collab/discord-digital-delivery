@@ -217,7 +217,7 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-async async function handleComponentInteraction(interaction, env, ctx) {
+async function handleComponentInteraction(interaction, env, ctx) {
   const customId = String(interaction.data?.custom_id ?? "");
   if (customId === "purchase-panel") {
     if (!isAllowedSalesChannel(interaction, env)) return ephemeral("購入は指定された販売チャンネルでのみ利用できます。");
