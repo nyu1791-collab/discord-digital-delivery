@@ -217,11 +217,11 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-async function handleComponentInteraction(interaction, env, ctx) {
+async async function handleComponentInteraction(interaction, env, ctx) {
   const customId = String(interaction.data?.custom_id ?? "");
   if (customId === "purchase-panel") {
     if (!isAllowedSalesChannel(interaction, env)) return ephemeral("購入は指定された販売チャンネルでのみ利用できます。");
-    return deferProductSelector(interaction, env, ctx);
+    return productSelectorInteraction(interaction, env, 0, RESPONSE_CHANNEL_MESSAGE);
   }
   if (customId.startsWith("product-select:")) {
     const productId = interaction.data?.values?.[0] ?? "";
@@ -229,9 +229,21 @@ async function handleComponentInteraction(interaction, env, ctx) {
   }
   if (customId.startsWith("products-page:")) {
     const page = Number(customId.slice("products-page:".length));
-    return deferProductSelector(interaction, env, ctx, page, 6);
+    return productSelectorInteraction(interaction, env, page, 7);
   }
   return ephemeral("この操作は期限切れです。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
+}
+
+async function productSelectorInteraction(interaction, env, requestedPage, responseType) {
+  try {
+    const response = await openProductSelector(interaction, env, requestedPage);
+    const payload = await response.json();
+    payload.type = responseType;
+    return json(payload);
+  } catch (error) {
+    console.error("Product selector response failed", error instanceof Error ? error.message : "unknown error");
+    return ephemeral("商品一覧を読み込めませんでした。もう一度お試しください。");
+  }
 }
 
 async function handlePaymentLinkSubmission(interaction, env) {
