@@ -9,6 +9,10 @@ const RESPONSE_MODAL = 9;
 const EPHEMERAL = 1 << 6;
 const ORDER_TTL_MS = 30 * 60 * 1000;
 const DOWNLOAD_TTL_SECONDS = 10 * 60;
+const DISCORD_SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
+const DISCORD_SIGNATURE_MAX_FUTURE_SKEW_MS = 60 * 1000;
+const PROCESSED_INTERACTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
   async fetch(request, env) {
@@ -50,6 +54,10 @@ async function handleInteraction(interaction, env) {
     return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
   }
 
+  if (!await markInteractionAsNew(interaction, env)) {
+    return ephemeral("この操作はすでに受け付け済みです。重複して注文・配布されることはありません。");
+  }
+
   if (interaction.type === DISCORD_APPLICATION_COMMAND) {
     return handleCommand(interaction, env);
   }
@@ -72,6 +80,8 @@ async function handleCommand(interaction, env) {
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
   if (command === "cancel") return cancelOrder(interaction, env);
+  if (command === "pending") return listPendingOrders(interaction, env);
+  if (command === "status") return showOrderStatus(interaction, env);
   if (command === "download") return createDownloadLink(interaction, env);
   return ephemeral("未知のコマンドです。");
 }
@@ -119,37 +129,39 @@ async function handlePaymentLinkSubmission(interaction, env) {
   if (!buyerId) return ephemeral("購入者情報を確認できませんでした。");
 
   const now = new Date();
+  await expireStaleOrders(env, now);
   const recentOrder = await env.DB.prepare(
     `SELECT code FROM orders
        WHERE buyer_discord_id = ?
          AND product_id = ?
          AND status = 'awaiting_manual_acceptance'
-         AND created_at >= ?
        ORDER BY created_at DESC LIMIT 1`,
-  ).bind(buyerId, product.id, new Date(now.getTime() - 15 * 60 * 1000).toISOString()).first();
+  ).bind(buyerId, product.id).first();
 
   if (recentOrder?.code) {
     return ephemeral(`同じ商品の未処理注文があります（注文番号：${recentOrder.code}）。受取リンクの期限が切れた場合は、管理者へ取り消しを依頼してから再注文してください。`);
   }
 
-  const orderId = crypto.randomUUID();
-  const code = createOrderCode();
-  const expiresAt = new Date(now.getTime() + ORDER_TTL_MS).toISOString();
   const ciphertext = await encryptReceiveLink(receiveLink, env.PAYPAY_LINK_ENCRYPTION_KEY);
+  const order = await createPendingOrder({
+    env,
+    buyerId,
+    guildId: interaction.guild_id ?? null,
+    product,
+    ciphertext,
+    now,
+  });
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO orders (
-        id, code, buyer_discord_id, guild_id, product_id, status,
-        paypay_receive_link_ciphertext, created_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, 'awaiting_manual_acceptance', ?, ?, ?)`,
-    ).bind(orderId, code, buyerId, interaction.guild_id ?? null, product.id, ciphertext, now.toISOString(), expiresAt),
-    auditStatement(env, orderId, buyerId, "payment_link_submitted", { productId: product.id }),
-  ]);
+  if (order.kind === "duplicate") {
+    return ephemeral(`同じ商品の未処理注文があります（注文番号：${order.code}）。受取リンクの期限が切れた場合は、管理者へ取り消しを依頼してから再注文してください。`);
+  }
+  if (order.kind !== "created") {
+    throw new Error("Could not create a unique order");
+  }
 
   return ephemeral(
-    `注文を受け付けました。\n注文番号：**${code}**\n商品：${product.title}（${formatYen(product.priceYen)}）\n` +
-      `管理者がPayPayで受取確認後、/download order:${code} で受け取れます。\n` +
+    `注文を受け付けました。\n注文番号：**${order.code}**\n商品：${product.title}（${formatYen(product.priceYen)}）\n` +
+      `確認期限：30分\n管理者がPayPayで受取確認後、/download order:${order.code} で受け取れます。\n` +
       "重要：リンクのパスワード・PayPayの暗証番号・ログイン情報は送らないでください。",
   );
 }
@@ -179,11 +191,11 @@ async function claimPaymentLink(interaction, env) {
     auditStatement(env, order.id, ownerId, "payment_link_revealed_to_owner", {}),
   ]);
 
-  const product = findProduct(order.product_id);
+  const terms = await deliveryTermsForOrder(env, order);
   return ephemeral(
-    `注文：${order.code}\n商品：${product?.title ?? order.product_id}\n確認額：${formatYen(product?.priceYen ?? 0)}\n\n` +
+    `注文：${order.code}\n商品：${terms?.productTitle ?? order.product_id}\n確認額：${formatYen(terms?.priceYen ?? 0)}\n\n` +
       `受取リンク（管理者だけに表示）：\n<${link}>\n\n` +
-      "PayPayアプリで金額と受取完了を確認してから、/approve order:注文番号 を実行してください。",
+      "PayPayアプリで金額と受取完了を確認してから、/approve order:注文番号 amount:実額 を実行してください。",
   );
 }
 
@@ -194,10 +206,10 @@ async function approveOrder(interaction, env) {
   if (!order) return ephemeral("注文が見つかりません。");
   if (order.status !== "awaiting_manual_acceptance") return ephemeral(`この注文は ${order.status} 状態です。`);
   if (!order.claimed_at) return ephemeral("先に /claim で受取リンクを確認し、PayPayで受取完了を確認してください。");
-  const product = findProduct(order.product_id);
+  const terms = await deliveryTermsForOrder(env, order);
   const confirmedAmount = Number(optionValue(interaction, "amount"));
-  if (!product || !Number.isSafeInteger(confirmedAmount) || confirmedAmount !== product.priceYen) {
-    return ephemeral(`金額が一致しないため承認を停止しました。PayPayの受取額を確認し、${formatYen(product?.priceYen ?? 0)}ちょうどの場合だけ再実行してください。`);
+  if (!terms || !Number.isSafeInteger(confirmedAmount) || confirmedAmount !== terms.priceYen) {
+    return ephemeral(`金額が一致しないため承認を停止しました。PayPayの受取額を確認し、${formatYen(terms?.priceYen ?? 0)}ちょうどの場合だけ再実行してください。`);
   }
   if (Date.parse(order.expires_at) <= Date.now()) {
     await expireOrder(env, order.id);
@@ -212,7 +224,16 @@ async function approveOrder(interaction, env) {
   ).bind(new Date().toISOString(), ownerId, order.id).run();
 
   if (result.meta.changes !== 1) return ephemeral("この注文は別の操作で更新されました。/claim で状態を確認してください。");
-  await auditStatement(env, order.id, ownerId, "delivery_approved", {}).run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO order_payment_confirmations (
+        order_id, confirmed_amount_yen, confirmed_at, confirmed_by_discord_id
+      ) VALUES (?, ?, ?, ?)`,
+    ).bind(order.id, confirmedAmount, new Date().toISOString(), ownerId),
+    env.DB.prepare("DELETE FROM pending_order_locks WHERE buyer_discord_id = ? AND product_id = ? AND order_id = ?")
+      .bind(order.buyer_discord_id, order.product_id, order.id),
+    auditStatement(env, order.id, ownerId, "delivery_approved", { confirmedAmountYen: confirmedAmount }),
+  ]);
   return ephemeral(`承認しました。購入者は /download order:${order.code} で、期限付きの受取リンクを表示できます。`);
 }
 
@@ -227,8 +248,52 @@ async function cancelOrder(interaction, env) {
     "UPDATE orders SET status = 'cancelled', cancelled_at = ?, cancelled_by_discord_id = ?, paypay_receive_link_ciphertext = '' WHERE id = ? AND status = 'awaiting_manual_acceptance'",
   ).bind(new Date().toISOString(), ownerId, order.id).run();
   if (result.meta.changes !== 1) return ephemeral("この注文は別の操作で更新されました。");
-  await auditStatement(env, order.id, ownerId, "order_cancelled", {}).run();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM pending_order_locks WHERE buyer_discord_id = ? AND product_id = ? AND order_id = ?")
+      .bind(order.buyer_discord_id, order.product_id, order.id),
+    auditStatement(env, order.id, ownerId, "order_cancelled", {}),
+  ]);
   return ephemeral(`注文 ${order.code} を取り消しました。`);
+}
+
+async function listPendingOrders(interaction, env) {
+  const denied = requireOwner(interaction, env);
+  if (denied) return denied;
+  await expireStaleOrders(env, new Date());
+  const rows = await env.DB.prepare(
+    `SELECT o.code, o.product_id, o.created_at, o.expires_at, t.product_title, t.price_yen
+       FROM orders o
+       LEFT JOIN order_delivery_terms t ON t.order_id = o.id
+      WHERE o.status = 'awaiting_manual_acceptance'
+      ORDER BY o.created_at ASC
+      LIMIT 20`,
+  ).all();
+  if (!rows.results?.length) return ephemeral("未処理の注文はありません。");
+  const lines = rows.results.map((row) => {
+    const title = row.product_title ?? row.product_id ?? "商品情報なし";
+    const amount = Number.isSafeInteger(row.price_yen) ? formatYen(row.price_yen) : "金額不明";
+    return `・${row.code}｜${title}（${amount}）｜期限 ${formatDateTime(row.expires_at)}`;
+  });
+  return ephemeral(`未処理注文（最大20件）\n${lines.join("\n")}\n\n確認する場合は /claim order:注文番号 を実行してください。`);
+}
+
+async function showOrderStatus(interaction, env) {
+  const order = await orderByCode(env, optionValue(interaction, "order"));
+  if (!order) return ephemeral("注文が見つかりません。");
+  const userId = interaction.member?.user?.id ?? interaction.user?.id;
+  if (order.buyer_discord_id !== userId && userId !== env.OWNER_DISCORD_ID) {
+    return ephemeral("この注文の状態は購入者本人だけが確認できます。");
+  }
+  if (order.status === "awaiting_manual_acceptance" && Date.parse(order.expires_at) <= Date.now()) {
+    await expireOrder(env, order.id);
+    return ephemeral("この注文は期限切れです。新しいPayPay受取リンクで再注文してください。");
+  }
+  const terms = await deliveryTermsForOrder(env, order);
+  const statusText = orderStatusLabel(order.status);
+  const downloadText = order.status === "approved"
+    ? `残りダウンロード回数：${Math.max(0, (terms?.maxDownloads ?? 0) - order.download_uses)}回`
+    : `確認期限：${formatDateTime(order.expires_at)}`;
+  return ephemeral(`注文番号：${order.code}\n商品：${terms?.productTitle ?? order.product_id}\n金額：${formatYen(terms?.priceYen ?? 0)}\n状態：${statusText}\n${downloadText}`);
 }
 
 async function createDownloadLink(interaction, env) {
@@ -237,9 +302,9 @@ async function createDownloadLink(interaction, env) {
   const userId = interaction.member?.user?.id ?? interaction.user?.id;
   if (order.buyer_discord_id !== userId) return ephemeral("この注文の受取リンクは購入者本人だけが表示できます。");
   if (order.status !== "approved") return ephemeral("まだ配布可能ではありません。PayPay受取確認後に有効になります。");
-  const product = findProduct(order.product_id);
-  if (!product) return ephemeral("商品ファイルの設定を確認できません。管理者へ連絡してください。");
-  if (order.download_uses >= product.maxDownloads) return ephemeral("この注文のダウンロード上限に達しています。必要な場合は管理者へ連絡してください。");
+  const terms = await deliveryTermsForOrder(env, order);
+  if (!terms) return ephemeral("商品ファイルの設定を確認できません。管理者へ連絡してください。");
+  if (order.download_uses >= terms.maxDownloads) return ephemeral("この注文のダウンロード上限に達しています。必要な場合は管理者へ連絡してください。");
 
   const expires = Math.floor(Date.now() / 1000) + DOWNLOAD_TTL_SECONDS;
   const signature = await signDownload(order.id, expires, env.PRODUCT_DOWNLOAD_SIGNING_KEY);
@@ -252,7 +317,7 @@ async function createDownloadLink(interaction, env) {
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
       flags: EPHEMERAL,
-      content: `受取リンクは10分間有効です。残り回数：${product.maxDownloads - order.download_uses}回`,
+      content: `受取リンクは10分間有効です。残り回数：${terms.maxDownloads - order.download_uses}回`,
       components: [
         actionRow({ type: 2, style: 5, label: "動画を受け取る", url: link.toString() }),
       ],
@@ -271,24 +336,24 @@ async function handleDownload(request, env, url) {
   if (!timingSafeEqual(signature, expected)) return new Response("This download link is invalid.", { status: 403 });
 
   const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
-  const product = order ? findProduct(order.product_id) : null;
-  if (!order || !product || order.status !== "approved") return new Response("This product is unavailable.", { status: 404 });
-  if (order.download_uses >= product.maxDownloads) return new Response("Download limit reached.", { status: 429 });
+  const terms = order ? await deliveryTermsForOrder(env, order) : null;
+  if (!order || !terms || order.status !== "approved") return new Response("This product is unavailable.", { status: 404 });
+  if (order.download_uses >= terms.maxDownloads) return new Response("Download limit reached.", { status: 429 });
 
-  const object = await env.PRODUCT_ASSETS.get(product.objectKey);
+  const object = await env.PRODUCT_ASSETS.get(terms.objectKey);
   if (!object) return new Response("Product file is unavailable. Please contact support.", { status: 503 });
 
   const update = await env.DB.prepare(
     `UPDATE orders
        SET download_uses = download_uses + 1, last_downloaded_at = ?
      WHERE id = ? AND status = 'approved' AND download_uses < ?`,
-  ).bind(new Date().toISOString(), order.id, product.maxDownloads).run();
+  ).bind(new Date().toISOString(), order.id, terms.maxDownloads).run();
   if (update.meta.changes !== 1) return new Response("Download limit reached.", { status: 429 });
 
   await auditStatement(env, order.id, null, "download_served", { requestMethod: request.method }).run();
   const headers = new Headers();
   headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
-  headers.set("Content-Disposition", `attachment; filename=\"${safeFilename(product.downloadName)}\"`);
+  headers.set("Content-Disposition", `attachment; filename=\"${safeFilename(terms.downloadName)}\"`);
   headers.set("Cache-Control", "private, no-store, max-age=0");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "no-referrer");
@@ -296,10 +361,142 @@ async function handleDownload(request, env, url) {
   return new Response(object.body, { headers });
 }
 
+async function createPendingOrder({ env, buyerId, guildId, product, ciphertext, now }) {
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + ORDER_TTL_MS).toISOString();
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const orderId = crypto.randomUUID();
+    const code = createOrderCode();
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO orders (
+            id, code, buyer_discord_id, guild_id, product_id, status,
+            paypay_receive_link_ciphertext, created_at, expires_at
+          ) VALUES (?, ?, ?, ?, ?, 'awaiting_manual_acceptance', ?, ?, ?)`,
+        ).bind(orderId, code, buyerId, guildId, product.id, ciphertext, nowIso, expiresAt),
+        env.DB.prepare(
+          `INSERT INTO order_delivery_terms (
+            order_id, product_title, price_yen, object_key, download_name, max_downloads, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(orderId, product.title, product.priceYen, product.objectKey, product.downloadName, product.maxDownloads, nowIso),
+        env.DB.prepare(
+          `INSERT INTO pending_order_locks (
+            buyer_discord_id, product_id, order_id, expires_at, created_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+        ).bind(buyerId, product.id, orderId, expiresAt, nowIso),
+        auditStatement(env, orderId, buyerId, "payment_link_submitted", {
+          productId: product.id,
+          priceYen: product.priceYen,
+        }),
+      ]);
+      return { kind: "created", id: orderId, code, expiresAt };
+    } catch (error) {
+      if (isUniqueConstraint(error)) {
+        const existing = await env.DB.prepare(
+          `SELECT o.code
+             FROM pending_order_locks lock
+             JOIN orders o ON o.id = lock.order_id
+            WHERE lock.buyer_discord_id = ? AND lock.product_id = ?
+            LIMIT 1`,
+        ).bind(buyerId, product.id).first();
+        if (existing?.code) return { kind: "duplicate", code: existing.code };
+        continue;
+      }
+      throw error;
+    }
+  }
+  return { kind: "failed" };
+}
+
+async function deliveryTermsForOrder(env, order) {
+  const snapshot = await env.DB.prepare(
+    `SELECT product_title, price_yen, object_key, download_name, max_downloads
+       FROM order_delivery_terms
+      WHERE order_id = ?`,
+  ).bind(order.id).first();
+  if (snapshot) return normalizeDeliveryTerms(snapshot);
+
+  // 古いテスト注文への後方互換です。新しい注文は必ず作成時の条件を保存します。
+  const fallback = findProduct(order.product_id);
+  return fallback ? normalizeDeliveryTerms({
+    product_title: fallback.title,
+    price_yen: fallback.priceYen,
+    object_key: fallback.objectKey,
+    download_name: fallback.downloadName,
+    max_downloads: fallback.maxDownloads,
+  }) : null;
+}
+
+function normalizeDeliveryTerms(value) {
+  const priceYen = Number(value.price_yen);
+  const maxDownloads = Number(value.max_downloads);
+  if (
+    !Number.isSafeInteger(priceYen) || priceYen < 1 ||
+    !Number.isSafeInteger(maxDownloads) || maxDownloads < 1 ||
+    typeof value.product_title !== "string" || !value.product_title ||
+    typeof value.object_key !== "string" || !value.object_key ||
+    typeof value.download_name !== "string" || !value.download_name
+  ) return null;
+  return {
+    productTitle: value.product_title,
+    priceYen,
+    objectKey: value.object_key,
+    downloadName: value.download_name,
+    maxDownloads,
+  };
+}
+
+async function expireStaleOrders(env, now) {
+  const nowIso = now.toISOString();
+  const stale = await env.DB.prepare(
+    `SELECT id, buyer_discord_id, product_id
+       FROM orders
+      WHERE status = 'awaiting_manual_acceptance' AND expires_at <= ?
+      ORDER BY expires_at ASC
+      LIMIT ?`,
+  ).bind(nowIso, MAX_PENDING_ORDERS_TO_CLEAN).all();
+  if (!stale.results?.length) return;
+
+  const statements = [];
+  for (const order of stale.results) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE orders
+            SET status = 'expired', paypay_receive_link_ciphertext = ''
+          WHERE id = ? AND status = 'awaiting_manual_acceptance'`,
+      ).bind(order.id),
+      env.DB.prepare("DELETE FROM pending_order_locks WHERE buyer_discord_id = ? AND product_id = ? AND order_id = ?")
+        .bind(order.buyer_discord_id, order.product_id, order.id),
+      auditStatement(env, order.id, null, "order_expired", {}),
+    );
+  }
+  await env.DB.batch(statements);
+}
+
+async function markInteractionAsNew(interaction, env) {
+  const interactionId = String(interaction.id ?? "");
+  if (!/^\d{15,25}$/.test(interactionId)) return false;
+  const now = new Date();
+  const result = await env.DB.prepare(
+    "INSERT OR IGNORE INTO processed_discord_interactions (interaction_id, processed_at) VALUES (?, ?)",
+  ).bind(interactionId, now.toISOString()).run();
+  if (result.meta.changes !== 1) return false;
+
+  // Best effort cleanup only. Failure here must not make a legitimate purchase fail.
+  env.DB.prepare("DELETE FROM processed_discord_interactions WHERE processed_at < ?")
+    .bind(new Date(now.getTime() - PROCESSED_INTERACTION_RETENTION_MS).toISOString())
+    .run()
+    .catch(() => {});
+  return true;
+}
+
 async function verifyDiscordInteraction(request, env) {
   const signatureHex = request.headers.get("X-Signature-Ed25519") ?? "";
   const timestamp = request.headers.get("X-Signature-Timestamp") ?? "";
   if (!/^[0-9a-f]{128}$/i.test(signatureHex) || !/^\d{10,13}$/.test(timestamp)) throw new Error("Missing Discord signature");
+  if (!isFreshDiscordTimestamp(timestamp)) throw new Error("Stale Discord signature");
   const body = await request.text();
   const key = await crypto.subtle.importKey("raw", hexToBytes(env.DISCORD_APPLICATION_PUBLIC_KEY), { name: "Ed25519" }, false, ["verify"]);
   const valid = await crypto.subtle.verify(
@@ -314,15 +511,27 @@ async function verifyDiscordInteraction(request, env) {
 
 function extractPayPayReceiveLink(input) {
   if (typeof input !== "string" || input.length > 512) return null;
-  const match = input.match(/https:\/\/pay\.paypay\.ne\.jp\/[A-Za-z0-9_-]{6,128}(?:\/?)(?!\S)/);
-  if (!match) return null;
-  try {
-    const url = new URL(match[0]);
-    if (url.protocol !== "https:" || url.hostname !== "pay.paypay.ne.jp" || url.username || url.password || url.search || url.hash) return null;
-    return url.toString();
-  } catch {
-    return null;
+  const candidates = input.match(/https:\/\/pay\.paypay\.ne\.jp\/[^\s<>"']+/g) ?? [];
+  for (const candidate of candidates) {
+    // Japanese full stops and closing punctuation are commonly pasted directly
+    // after a URL. Remove only punctuation that cannot be part of the token.
+    const normalized = candidate.replace(/[.,、。!！?？)\]}>）］｝＞]+$/u, "");
+    try {
+      const url = new URL(normalized);
+      if (
+        url.protocol === "https:" &&
+        url.hostname === "pay.paypay.ne.jp" &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash &&
+        /^\/[A-Za-z0-9_-]{6,128}\/?$/.test(url.pathname)
+      ) return url.toString();
+    } catch {
+      // Continue to the next candidate rather than rejecting a whole message.
+    }
   }
+  return null;
 }
 
 function requireOwner(interaction, env) {
@@ -345,8 +554,15 @@ async function orderByCode(env, value) {
 }
 
 async function expireOrder(env, orderId) {
+  const order = await env.DB.prepare("SELECT buyer_discord_id, product_id FROM orders WHERE id = ?").bind(orderId).first();
+  if (!order) return;
+  const result = await env.DB.prepare(
+    "UPDATE orders SET status = 'expired', paypay_receive_link_ciphertext = '' WHERE id = ? AND status = 'awaiting_manual_acceptance'",
+  ).bind(orderId).run();
+  if (result.meta.changes !== 1) return;
   await env.DB.batch([
-    env.DB.prepare("UPDATE orders SET status = 'expired', paypay_receive_link_ciphertext = '' WHERE id = ? AND status = 'awaiting_manual_acceptance'").bind(orderId),
+    env.DB.prepare("DELETE FROM pending_order_locks WHERE buyer_discord_id = ? AND product_id = ? AND order_id = ?")
+      .bind(order.buyer_discord_id, order.product_id, orderId),
     auditStatement(env, orderId, null, "order_expired", {}),
   ]);
 }
@@ -355,6 +571,19 @@ function auditStatement(env, orderId, actorId, eventType, details) {
   return env.DB.prepare(
     "INSERT INTO order_audit_events (id, order_id, actor_discord_id, event_type, created_at, details_json) VALUES (?, ?, ?, ?, ?, ?)",
   ).bind(crypto.randomUUID(), orderId, actorId, eventType, new Date().toISOString(), JSON.stringify(details));
+}
+
+function isFreshDiscordTimestamp(value, nowMs = Date.now()) {
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric)) return false;
+  const timestampMs = String(value).length === 13 ? numeric : numeric * 1000;
+  const age = nowMs - timestampMs;
+  return age <= DISCORD_SIGNATURE_MAX_AGE_MS && age >= -DISCORD_SIGNATURE_MAX_FUTURE_SKEW_MS;
+}
+
+function isUniqueConstraint(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unique constraint|constraint failed/i.test(message);
 }
 
 async function encryptReceiveLink(value, encodedKey) {
@@ -464,7 +693,29 @@ function safeFilename(value) {
 }
 
 function formatYen(value) {
-  return `${Number(value).toLocaleString("ja-JP")}円`;
+  const amount = Number(value);
+  return Number.isSafeInteger(amount) && amount >= 0 ? `${amount.toLocaleString("ja-JP")}円` : "金額不明";
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "日時不明";
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function orderStatusLabel(status) {
+  return ({
+    awaiting_manual_acceptance: "管理者の受取確認待ち",
+    approved: "承認済み・受取可能",
+    cancelled: "取り消し済み",
+    expired: "確認期限切れ",
+  })[status] ?? "状態不明";
 }
 
 function landingPage() {
@@ -519,3 +770,14 @@ function landingPage() {
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 }
+
+// Exported only for deterministic local tests. The Worker runtime uses the
+// default export above; no secret or database operation is exposed here.
+export const __testables = Object.freeze({
+  extractPayPayReceiveLink,
+  isFreshDiscordTimestamp,
+  isUuid,
+  normalizeDeliveryTerms,
+  safeFilename,
+  timingSafeEqual,
+});

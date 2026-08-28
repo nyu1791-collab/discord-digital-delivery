@@ -20,6 +20,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Verify syntax and security-focused unit tests
+        run: npm run check
+
       - name: Resolve Cloudflare account ID
         id: cloudflare
         env:
@@ -73,6 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           npx --yes wrangler@4.38.0 d1 execute discord-digital-delivery --remote --file=./migrations/0001_orders.sql --config=./wrangler.generated.toml
+          npx --yes wrangler@4.38.0 d1 execute discord-digital-delivery --remote --file=./migrations/0002_order_integrity.sql --config=./wrangler.generated.toml
           npx --yes wrangler@4.38.0 deploy --config=./wrangler.generated.toml
 
       - name: Register Discord slash commands
