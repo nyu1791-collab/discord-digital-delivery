@@ -242,11 +242,16 @@ async function reconcilePurchasePanel(env) {
   const listResponse = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages?limit=100");
   if (!listResponse.ok) throw new Error("Could not read sales channel messages: HTTP " + listResponse.status);
   const messages = await listResponse.json();
-  const existing = messages.find((message) =>
+  const panelMessages = messages.filter((message) =>
     (message.components || []).some((row) =>
       (row.components || []).some((component) => component.custom_id === "purchase-panel" || component.custom_id?.startsWith("product-select:")),
     ),
   );
+  const existing = panelMessages[0];
+  for (const duplicate of panelMessages.slice(1)) {
+    const deleted = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(duplicate.id), { method: "DELETE" });
+    if (!deleted.ok && deleted.status !== 404) console.error("Could not remove duplicate purchase panel: HTTP " + deleted.status);
+  }
   const response = existing
     ? await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
         method: "PATCH",
