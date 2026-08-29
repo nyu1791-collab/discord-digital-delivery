@@ -236,7 +236,11 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-async function handleComponentInteraction(interaction, env) {
+function handleComponentInteraction(interaction, env) {
+  const customId = String(interaction.data?.custom_id ?? "");
+  if (!customId.startsWith("product-select:")) {
+    return ephemeral("この操作は期限切れです。最新の商品一覧から選び直してください。");
+  }
   const productId = interaction.data?.values?.[0] ?? "";
   return openPaymentModal(interaction, env, productId);
 }
