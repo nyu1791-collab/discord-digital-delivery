@@ -1,4 +1,5 @@
 import { PRODUCTS, findProduct, isVideoObjectKey, productFromObject } from "./catalog.js";
+import { cleanupStripeSessions, createStripeCheckoutSession, getStripeCheckoutStatus, handleStripeDownload, handleStripeWebhook, stripeBuyPage, stripeStorePage, stripeThanksPage } from "./stripe.js";
 
 const DISCORD_PING = 1;
 const DISCORD_APPLICATION_COMMAND = 2;
@@ -17,7 +18,7 @@ const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(reconcilePurchasePanel(env));
+    ctx.waitUntil(cleanupStripeSessions(env));
   },
 
   async fetch(request, env, ctx) {
@@ -28,7 +29,46 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/") {
-      return landingPage();
+      try {
+        return stripeStorePage(await listR2Products(env));
+      } catch (error) {
+        console.error("Store unavailable", error instanceof Error ? error.message : "unknown error");
+        return new Response("Store unavailable", { status: 503 });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/buy") {
+      return stripeBuyPage(await runtimeProductById(env, url.searchParams.get("product") ?? ""), url.searchParams.get("cancelled") === "1");
+    }
+
+    if (request.method === "GET" && url.pathname === "/thanks") {
+      return stripeThanksPage(url.searchParams.get("session_id"));
+    }
+
+    if (request.method === "POST" && url.pathname === "/stripe/create-checkout") {
+      return createCheckoutFromRequest(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/stripe/webhook") {
+      try {
+        return await handleStripeWebhook(request, env);
+      } catch (error) {
+        console.error("Stripe webhook failed", error instanceof Error ? error.message : "unknown error");
+        return new Response("Webhook processing failed", { status: 500 });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/stripe/session") {
+      try {
+        return await getStripeCheckoutStatus(env, url.searchParams.get("session_id") ?? "");
+      } catch (error) {
+        console.error("Stripe session lookup failed", error instanceof Error ? error.message : "unknown error");
+        return json({ error: "unavailable" }, 503);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/stripe/download") {
+      return handleStripeDownload(env, url);
     }
 
     if (request.method === "GET" && url.pathname === "/products") {
@@ -56,10 +96,29 @@ export default {
   },
 };
 
+async function createCheckoutFromRequest(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "invalid_request" }, 400);
+  }
+  const product = await runtimeProductById(env, payload?.productId ?? "");
+  if (!product) return json({ error: "product_not_found" }, 404);
+  try {
+    return await createStripeCheckoutSession(env, product);
+  } catch (error) {
+    console.error("Stripe Checkout creation failed", error instanceof Error ? error.message : "unknown error");
+    return json({ error: "checkout_unavailable" }, 503);
+  }
+}
+
 async function handleInteraction(interaction, env, ctx) {
   if (interaction.type === DISCORD_PING) {
     return json({ type: RESPONSE_PONG });
   }
+
+  return ephemeral("Discord内の注文受付は終了しました。販売者から届いた購入リンクを開いて、Stripeで決済してください。");
 
   if (!isAllowedGuildContext(interaction, env)) {
     return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
