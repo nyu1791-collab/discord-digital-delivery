@@ -28,6 +28,18 @@ export default {
       return landingPage();
     }
 
+    if (request.method === "GET" && url.pathname === "/store") {
+      return webStorePage(env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/store/order") {
+      return handleWebOrder(request, env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/store/order") {
+      return handleWebOrderStatus(env, url);
+    }
+
     if (request.method === "GET" && url.pathname === "/download") {
       return handleDownload(request, env, url);
     }
@@ -1011,6 +1023,102 @@ function orderStatusLabel(status) {
     cancelled: "取り消し済み",
     expired: "確認期限切れ",
   })[status] ?? "状態不明";
+}
+
+async function webStorePage(env) {
+  let products = [];
+  try {
+    products = await listR2Products(env);
+  } catch (error) {
+    console.error("Web store product listing failed", error instanceof Error ? error.message : "unknown error");
+  }
+  const options = products.map((product) =>
+    `<option value="${escapeHtml(product.id)}">${escapeHtml(product.title)}（${formatYen(product.priceYen)}）</option>`,
+  ).join("");
+  const html = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>動画購入ページ</title>
+<style>
+body{margin:0;background:#0b1728;color:#f5f8ff;font-family:system-ui,sans-serif}
+main{max-width:560px;margin:auto;padding:28px 18px 48px}.card{background:#122944;border:1px solid #2b4d73;border-radius:16px;padding:22px}
+h1{margin-top:0}.muted{color:#b8c7da;line-height:1.7}label{display:block;margin-top:18px;font-weight:700}
+select,input{box-sizing:border-box;width:100%;margin-top:8px;padding:13px;border-radius:10px;border:1px solid #496b92;background:#091a30;color:#fff;font-size:1rem}
+button{width:100%;margin-top:22px;padding:14px;border:0;border-radius:10px;background:#3b8df5;color:#fff;font-size:1rem;font-weight:700}
+.notice{font-size:.86rem;color:#bac8d9;line-height:1.7}
+</style></head><body><main><div class="card">
+<h1>動画購入</h1>
+<p class="muted">商品を選び、PayPayの受取リンクを入力してください。管理者が受取確認した後、このページからダウンロードできます。</p>
+<form method="post" action="/store/order">
+<label for="product">商品</label>
+<select id="product" name="product" required>${options || "<option value=\"\">現在商品がありません</option>"}</select>
+<label for="receive_link">PayPay受取リンク</label>
+<input id="receive_link" name="receive_link" type="url" inputmode="url" placeholder="https://pay.paypay.ne.jp/..." required minlength="20" maxlength="512">
+<input name="website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
+<button type="submit" ${products.length ? "" : "disabled"}>注文を送信</button>
+</form>
+<p class="notice">PayPayのパスワード、暗証番号、ログイン情報は入力しないでください。受取リンクだけを使用します。</p>
+</div></main></body></html>`;
+  return new Response(html, {headers: {"Content-Type":"text/html; charset=UTF-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"}});
+}
+
+async function handleWebOrder(request, env) {
+  try {
+    const form = await request.formData();
+    if (String(form.get("website") ?? "").trim()) return new Response("Bad request", {status: 400});
+    const productId = String(form.get("product") ?? "");
+    const receiveLink = extractPayPayReceiveLink(String(form.get("receive_link") ?? ""));
+    if (!receiveLink) return webErrorPage("PayPay受取リンクの形式を確認してください。");
+    const product = await runtimeProductById(env, productId);
+    if (!product) return webErrorPage("商品が見つかりません。購入ページを更新して再度お試しください。");
+    const now = new Date();
+    const buyerId = "web-" + crypto.randomUUID();
+    await expireStaleOrders(env, now);
+    const order = await createPendingOrder({
+      env, buyerId, guildId: null, product,
+      ciphertext: await encryptReceiveLink(receiveLink, env.PAYPAY_LINK_ENCRYPTION_KEY),
+      now,
+    });
+    if (order.kind === "duplicate") return webErrorPage("同じ商品の未処理注文があります。以前の注文番号を確認してください。");
+    if (order.kind !== "created") throw new Error("Could not create web order");
+    const statusUrl = new URL("/store/order", env.PUBLIC_BASE_URL);
+    statusUrl.searchParams.set("code", order.code);
+    return webMessagePage("注文を受け付けました", `注文番号：<strong>${escapeHtml(order.code)}</strong><br>30分以内に管理者がPayPay受取を確認します。`, statusUrl.toString());
+  } catch (error) {
+    console.error("Web order failed", error instanceof Error ? error.message : "unknown error");
+    return webErrorPage("注文処理に失敗しました。入力内容を確認して再度お試しください。", 500);
+  }
+}
+
+async function handleWebOrderStatus(env, url) {
+  const code = String(url.searchParams.get("code") ?? "").trim().toUpperCase();
+  const order = await orderByCode(env, code);
+  if (!order) return webErrorPage("注文番号が見つかりません。");
+  if (order.status !== "approved") {
+    const message = order.status === "awaiting_manual_acceptance"
+      ? "PayPay受取の確認待ちです。承認後、このページを再読み込みしてください。"
+      : "この注文は現在利用できません（" + escapeHtml(orderStatusLabel(order.status)) + "）。";
+    return webMessagePage("注文状況", message, url.toString());
+  }
+  const terms = await deliveryTermsForOrder(env, order);
+  if (!terms) return webErrorPage("商品情報を確認できません。");
+  if (order.download_uses >= terms.maxDownloads) return webErrorPage("ダウンロード上限に達しています。");
+  const expires = Math.floor(Date.now() / 1000) + DOWNLOAD_TTL_SECONDS;
+  const signature = await signDownload(order.id, expires, env.PRODUCT_DOWNLOAD_SIGNING_KEY);
+  const downloadUrl = new URL("/download", env.PUBLIC_BASE_URL);
+  downloadUrl.searchParams.set("order", order.id);
+  downloadUrl.searchParams.set("expires", String(expires));
+  downloadUrl.searchParams.set("sig", signature);
+  return webMessagePage("ダウンロードできます", `残り回数：${terms.maxDownloads - order.download_uses}回<br><a class="button" href="${downloadUrl.toString()}">動画を受け取る</a>`, url.toString());
+}
+
+function webMessagePage(title, message, nextUrl = null) {
+  const refresh = nextUrl ? `<p><a href="${escapeHtml(nextUrl)}">注文状況を更新</a></p>` : "";
+  const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title><style>body{margin:0;background:#0b1728;color:#f5f8ff;font-family:system-ui,sans-serif}main{max-width:560px;margin:auto;padding:40px 18px}.card{background:#122944;border:1px solid #2b4d73;border-radius:16px;padding:24px}a{color:#8ec1ff}.button{display:inline-block;margin-top:18px;padding:13px 18px;border-radius:10px;background:#3b8df5;color:#fff;text-decoration:none;font-weight:700}</style></head><body><main><div class="card"><h1>${escapeHtml(title)}</h1><p>${message}</p>${refresh}</div></main></body></html>`;
+  return new Response(html, {headers: {"Content-Type":"text/html; charset=UTF-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"}});
+}
+
+function webErrorPage(message, status = 400) {
+  return new Response(webMessagePage("エラー", escapeHtml(message)).body, {status, headers: {"Content-Type":"text/html; charset=UTF-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
 }
 
 function landingPage() {
