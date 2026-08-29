@@ -116,35 +116,21 @@ function setupPersistentPanel(interaction, env, ctx) {
   const denied = requireOwner(interaction, env);
   if (denied) return denied;
   if (!isAllowedSalesChannel(interaction, env)) return ephemeral("販売チャンネルで実行してください。");
-  if (!ctx?.waitUntil) return ephemeral("販売チャンネルに購入パネルを設置するには、もう一度お試しください。");
-  ctx.waitUntil(
-    (async () => {
-      const response = await discordApi(env, "/channels/" + encodeURIComponent(interaction.channel_id) + "/messages", {
-        method: "POST",
-        body: JSON.stringify(createPurchasePanelPayload().data),
-      });
-      if (!response.ok) throw new Error("Discord panel message creation failed: HTTP " + response.status);
-      await editOriginalInteractionResponse(
-        interaction,
-        env,
-        ephemeral("購入パネルを設置しました。以後、購入者はこのボタンだけで購入できます。"),
-      );
-    })().catch(async (error) => {
-      console.error("Persistent panel setup failed", error instanceof Error ? error.message : "unknown error");
-      try {
-        await editOriginalInteractionResponse(
-          interaction,
-          env,
-          ephemeral("購入パネルを設置できませんでした。Botのチャンネルへの「メッセージ送信」権限を確認してください。"),
-        );
-      } catch (updateError) {
-        console.error("Panel setup error response update failed", updateError instanceof Error ? updateError.message : "unknown error");
-      }
-    }),
-  );
-  return json({ type: 5, data: { flags: EPHEMERAL } });
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(
+      (async () => {
+        const response = await discordApi(env, "/channels/" + encodeURIComponent(interaction.channel_id) + "/messages", {
+          method: "POST",
+          body: JSON.stringify(createPurchasePanelPayload().data),
+        });
+        if (!response.ok) throw new Error("Discord panel message creation failed: HTTP " + response.status);
+      })().catch((error) => console.error("Persistent panel setup failed", error instanceof Error ? error.message : "unknown error")),
+    );
+  }
+  // Do not wait for Discord's channel-message API: this acknowledgement itself
+  // must be returned within three seconds. The panel is posted in the background.
+  return ephemeral("購入パネルを設置しています。数秒後にこのチャンネルへ表示されます。");
 }
-
 function handlePurchaseCommand(interaction, env, ctx, command) {
   if (command === "panel") {
     const denied = requireOwner(interaction, env);
