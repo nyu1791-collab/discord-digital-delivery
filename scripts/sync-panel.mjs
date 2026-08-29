@@ -15,12 +15,39 @@ const api = (path, init = {}) => fetch("https://discord.com/api/v10" + path, {
   },
 });
 
+const workerUrl = process.env.WORKER_URL;
+if (!workerUrl) throw new Error("WORKER_URL is required");
+
+const productsResponse = await fetch(workerUrl + "/products");
+if (!productsResponse.ok) throw new Error("Could not load products: " + productsResponse.status);
+const products = await productsResponse.json();
+if (!Array.isArray(products)) throw new Error("Product list is invalid");
+const chunks = [];
+for (let index = 0; index < products.length; index += 25) chunks.push(products.slice(index, index + 25));
+const components = chunks.length
+  ? chunks.map((chunk, index) => ({
+      type: 1,
+      components: [{
+        type: 3,
+        custom_id: "product-select:" + index,
+        placeholder: chunks.length === 1 ? "商品を選択" : "商品を選択（" + (index + 1) + "/" + chunks.length + "）",
+        min_values: 1,
+        max_values: 1,
+        options: chunk.map((product) => ({
+          label: String(product.title).slice(0, 100),
+          value: product.id,
+          description: Number(product.priceYen).toLocaleString("ja-JP") + "円・最大" + product.maxDownloads + "回",
+        })),
+      }],
+    }))
+  : [{
+      type: 1,
+      components: [{ type: 3, custom_id: "product-select:0", placeholder: "商品がありません", disabled: true, options: [{ label: "準備中", value: "unavailable" }] }],
+    }];
+
 const panel = {
-  content: "購入する場合は、下の「商品を選ぶ」ボタンを押してください。",
-  components: [{
-    type: 1,
-    components: [{ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" }],
-  }],
+  content: "購入する動画を下の一覧から選択してください。",
+  components,
 };
 
 const listResponse = await api("/channels/" + channelId + "/messages?limit=100");
