@@ -70,6 +70,7 @@ async function handleInteraction(interaction, env, ctx) {
   const readOnlyInteraction =
     (interaction.type === DISCORD_APPLICATION_COMMAND &&
       ["panel", "buy", "shop"].includes(commandName)) ||
+    interaction.type === DISCORD_MODAL_SUBMIT ||
     (interaction.type === DISCORD_MESSAGE_COMPONENT &&
       (componentId === "purchase-panel" ||
         componentId.startsWith("product-select:") ||
@@ -83,7 +84,7 @@ async function handleInteraction(interaction, env, ctx) {
   }
 
   if (interaction.type === DISCORD_MODAL_SUBMIT) {
-    return handlePaymentLinkSubmission(interaction, env);
+    return deferPaymentLinkSubmission(interaction, env, ctx);
   }
 
   if (interaction.type === DISCORD_MESSAGE_COMPONENT) {
@@ -270,6 +271,37 @@ async function productSelectorInteraction(interaction, env, requestedPage, respo
     console.error("Product selector response failed", error instanceof Error ? error.message : "unknown error");
     return ephemeral("商品一覧を読み込めませんでした。もう一度お試しください。");
   }
+}
+
+function deferPaymentLinkSubmission(interaction, env, ctx) {
+  if (!ctx?.waitUntil) return handlePaymentLinkSubmission(interaction, env);
+  ctx.waitUntil(
+    (async () => {
+      if (!await markInteractionAsNew(interaction, env)) {
+        await editOriginalInteractionResponse(
+          interaction,
+          env,
+          ephemeral("この操作はすでに受け付け済みです。重複して注文・配布されることはありません。"),
+        );
+        return;
+      }
+      const response = await handlePaymentLinkSubmission(interaction, env);
+      const payload = await response.json();
+      await editOriginalInteractionResponse(interaction, env, payload);
+    })().catch(async (error) => {
+      console.error("Payment submission failed", error instanceof Error ? error.message : "unknown error");
+      try {
+        await editOriginalInteractionResponse(
+          interaction,
+          env,
+          ephemeral("決済リンクの処理に失敗しました。販売パネルからもう一度お試しください。"),
+        );
+      } catch (updateError) {
+        console.error("Payment error response update failed", updateError instanceof Error ? updateError.message : "unknown error");
+      }
+    }),
+  );
+  return json({ type: 5, data: { flags: EPHEMERAL } });
 }
 
 async function handlePaymentLinkSubmission(interaction, env) {
