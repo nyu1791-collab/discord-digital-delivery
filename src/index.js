@@ -344,7 +344,7 @@ async function notifyOwnerOfPendingOrder(env, order, product, receiveLink) {
     await sendDiscordDm(
       env,
       ownerId,
-      "新しい注文が届きました。\\n注文番号：**" + order.code + "\\n商品：" + product.title + "\\n金額：" + formatYen(product.priceYen) + "\\n\\nPayPayでこの金額の受取を確認してください。\\n受取リンク：<" + receiveLink + ">\\n\\n確認できたら、販売チャンネルで /approve order:" + order.code + " を実行してください。",
+      "新しい注文が届きました。\n注文番号：**" + order.code + "\n商品：" + product.title + "\n金額：" + formatYen(product.priceYen) + "\n\nPayPayでこの金額の受取を確認してください。\n受取リンク：<" + receiveLink + ">\n\n確認できたら、販売チャンネルで /approve order:" + order.code + " を実行してください。",
     );
     const claimedAt = new Date().toISOString();
     await env.DB.batch([
