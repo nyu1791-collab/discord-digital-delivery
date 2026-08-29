@@ -16,6 +16,10 @@ binding = "DB"
 database_name = "discord-digital-delivery"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
+
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[r2_buckets]]
 binding = "PRODUCT_ASSETS"
 bucket_name = "discord-digital-products"
