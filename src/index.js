@@ -4,7 +4,6 @@ const DISCORD_PING = 1;
 const DISCORD_APPLICATION_COMMAND = 2;
 const DISCORD_MODAL_SUBMIT = 5;
 const DISCORD_MESSAGE_COMPONENT = 3;
-const PRODUCT_PAGE_SIZE = 25;
 const RESPONSE_PONG = 1;
 const RESPONSE_CHANNEL_MESSAGE = 4;
 const RESPONSE_MODAL = 9;
@@ -66,23 +65,14 @@ async function handleInteraction(interaction, env, ctx) {
     return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
   }
 
-  const commandName = interaction.type === DISCORD_APPLICATION_COMMAND
-    ? String(interaction.data?.name ?? "")
-    : "";
   const componentId = interaction.type === DISCORD_MESSAGE_COMPONENT
     ? String(interaction.data?.custom_id ?? "")
     : "";
-  // Read-only UI interactions must answer within Discord's three-second deadline.
-  // They do not create orders or deliveries, so waiting on D1 deduplication here
-  // only adds latency and can produce "application did not respond".
+  // The catalog is already embedded in Discord's persistent panel, so selecting
+  // a product can open its modal without waiting on R2 or D1.
   const readOnlyInteraction =
-    (interaction.type === DISCORD_APPLICATION_COMMAND &&
-      ["panel", "buy", "shop", "setup"].includes(commandName)) ||
     interaction.type === DISCORD_MODAL_SUBMIT ||
-    (interaction.type === DISCORD_MESSAGE_COMPONENT &&
-      (componentId === "purchase-panel" ||
-        componentId.startsWith("product-select:") ||
-        componentId.startsWith("products-page:")));
+    (interaction.type === DISCORD_MESSAGE_COMPONENT && componentId.startsWith("product-select:"));
   if (!readOnlyInteraction && !await markInteractionAsNew(interaction, env)) {
     return ephemeral("この操作はすでに受け付け済みです。重複して注文・配布されることはありません。");
   }
@@ -102,15 +92,11 @@ async function handleInteraction(interaction, env, ctx) {
   return ephemeral("この操作には対応していません。");
 }
 
-async function handleCommand(interaction, env, ctx) {
+async function handleCommand(interaction, env) {
   const command = interaction.data?.name;
-  if (command === "buy" || command === "shop" || command === "download") {
-    if (!isAllowedSalesChannel(interaction, env)) {
-      return ephemeral("購入・受取は指定された販売チャンネルでのみ利用できます。");
-    }
+  if (command === "download" && !isAllowedSalesChannel(interaction, env)) {
+    return ephemeral("受取は指定された販売チャンネルでのみ利用できます。");
   }
-  if (command === "buy" || command === "shop" || command === "panel") return handlePurchaseCommand(interaction, env, ctx, command);
-  if (command === "setup") return setupPersistentPanel(interaction, env, ctx);
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
   if (command === "cancel") return cancelOrder(interaction, env);
@@ -118,81 +104,6 @@ async function handleCommand(interaction, env, ctx) {
   if (command === "status") return showOrderStatus(interaction, env);
   if (command === "download") return createDownloadLink(interaction, env);
   return ephemeral("未知のコマンドです。");
-}
-
-function setupPersistentPanel(interaction, env, ctx) {
-  const denied = requireOwner(interaction, env);
-  if (denied) return denied;
-  if (!isAllowedSalesChannel(interaction, env)) return ephemeral("販売チャンネルで実行してください。");
-  if (ctx?.waitUntil) {
-    ctx.waitUntil(
-      (async () => {
-        const response = await discordApi(env, "/channels/" + encodeURIComponent(interaction.channel_id) + "/messages", {
-          method: "POST",
-          body: JSON.stringify(createPurchasePanelPayload().data),
-        });
-        if (!response.ok) throw new Error("Discord panel message creation failed: HTTP " + response.status);
-      })().catch((error) => console.error("Persistent panel setup failed", error instanceof Error ? error.message : "unknown error")),
-    );
-  }
-  // Do not wait for Discord's channel-message API: this acknowledgement itself
-  // must be returned within three seconds. The panel is posted in the background.
-  return ephemeral("購入パネルを設置しています。数秒後にこのチャンネルへ表示されます。");
-}
-function handlePurchaseCommand(interaction, env, ctx, command) {
-  if (command === "panel") {
-    const denied = requireOwner(interaction, env);
-    if (denied) return denied;
-    if (!ctx?.waitUntil) return createPurchasePanel();
-    ctx.waitUntil(
-      editOriginalInteractionResponse(interaction, env, createPurchasePanelPayload())
-        .catch((error) => console.error("Panel response update failed", error instanceof Error ? error.message : "unknown error")),
-    );
-    return json({ type: 5 });
-  }
-  return deferProductSelector(interaction, env, ctx, 0, 5);
-}
-
-async function openProductSelector(interaction, env, requestedPage = 0) {
-  let products;
-  try {
-    products = await listR2Products(env);
-  } catch (error) {
-    console.error("Product listing failed", error instanceof Error ? error.message : "unknown error");
-    return ephemeral("商品一覧を読み込めませんでした。しばらく待ってから再度お試しください。");
-  }
-  if (!products.length) return ephemeral("現在販売できる動画がありません。管理者へ連絡してください。");
-  const pageCount = Math.max(1, Math.ceil(products.length / PRODUCT_PAGE_SIZE));
-  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), pageCount - 1);
-  const pageProducts = products.slice(page * PRODUCT_PAGE_SIZE, (page + 1) * PRODUCT_PAGE_SIZE);
-  const options = pageProducts.map((product) => ({
-    label: truncateDiscordLabel(product.title),
-    value: product.id,
-    description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
-  }));
-  const components = [actionRow({
-    type: 3,
-    custom_id: "product-select:" + page,
-    placeholder: "商品を選択（" + (page + 1) + "/" + pageCount + "）",
-    min_values: 1,
-    max_values: 1,
-    options,
-  })];
-  if (pageCount > 1) {
-    components.push(actionRow({
-      type: 1,
-      components: [
-        { type: 2, style: 2, label: "最初", custom_id: "products-page:0", disabled: page === 0 },
-        { type: 2, style: 2, label: "前へ", custom_id: "products-page:" + (page - 1), disabled: page === 0 },
-        { type: 2, style: 2, label: "次へ（" + (page + 1) + "/" + pageCount + "）", custom_id: "products-page:" + (page + 1), disabled: page >= pageCount - 1 },
-        { type: 2, style: 2, label: "最後", custom_id: "products-page:" + (pageCount - 1), disabled: page >= pageCount - 1 },
-      ],
-    }));
-  }
-  return ephemeralComponentMessage(
-    "販売動画一覧（全" + products.length + "本・各" + formatYen(2000) + "）から選択してください。",
-    components,
-  );
 }
 
 function openPaymentModal(interaction, env, selectedProductId = null) {
@@ -248,20 +159,25 @@ async function reconcilePurchasePanel(env) {
     ),
   );
   const existing = panelMessages[0];
-  for (const duplicate of panelMessages.slice(1)) {
+  const duplicate = panelMessages[1];
+  if (duplicate) {
     const deleted = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(duplicate.id), { method: "DELETE" });
-    if (!deleted.ok && deleted.status !== 404) console.error("Could not remove duplicate purchase panel: HTTP " + deleted.status);
+    if (!deleted.ok && deleted.status !== 404 && deleted.status !== 429) console.error("Could not remove duplicate purchase panel: HTTP " + deleted.status);
   }
-  const response = existing
-    ? await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
-        method: "PATCH",
-        body: JSON.stringify(panelPayload.data),
-      })
-    : await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
-        method: "POST",
-        body: JSON.stringify(panelPayload.data),
-      });
-  if (!response.ok) throw new Error("Could not reconcile purchase panel: HTTP " + response.status);
+  if (!existing) {
+    const created = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
+      method: "POST",
+      body: JSON.stringify(panelPayload.data),
+    });
+    if (!created.ok) throw new Error("Could not create purchase panel: HTTP " + created.status);
+    return;
+  }
+  if (panelSignature(existing) === panelSignature(panelPayload.data)) return;
+  const updated = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
+    method: "PATCH",
+    body: JSON.stringify(panelPayload.data),
+  });
+  if (!updated.ok) throw new Error("Could not update purchase panel: HTTP " + updated.status);
 }
 
 async function createCatalogPanelPayload(env) {
@@ -291,6 +207,28 @@ async function createCatalogPanelPayload(env) {
   };
 }
 
+function panelSignature(panel) {
+  return JSON.stringify({
+    content: panel.content ?? "",
+    components: (panel.components ?? []).map((row) => ({
+      type: row.type,
+      components: (row.components ?? []).map((component) => ({
+        type: component.type,
+        custom_id: component.custom_id,
+        placeholder: component.placeholder,
+        disabled: Boolean(component.disabled),
+        min_values: component.min_values,
+        max_values: component.max_values,
+        options: (component.options ?? []).map((option) => ({
+          label: option.label,
+          value: option.value,
+          description: option.description,
+        })),
+      })),
+    })),
+  });
+}
+
 async function discordApi(env, path, init = {}) {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bot ${env.DISCORD_BOT_TOKEN}`);
@@ -298,64 +236,13 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-async function handleComponentInteraction(interaction, env, ctx) {
+function handleComponentInteraction(interaction, env) {
   const customId = String(interaction.data?.custom_id ?? "");
-  if (customId === "purchase-panel") {
-    if (!isAllowedSalesChannel(interaction, env)) return ephemeral("購入は指定された販売チャンネルでのみ利用できます。");
-    return deferProductSelector(interaction, env, ctx, 0, 5);
+  if (!customId.startsWith("product-select:")) {
+    return ephemeral("この操作は期限切れです。最新の商品一覧から選び直してください。");
   }
-  if (customId.startsWith("product-select:")) {
-    const productId = interaction.data?.values?.[0] ?? "";
-    return openPaymentModal(interaction, env, productId);
-  }
-  if (customId.startsWith("products-page:")) {
-    const page = Number(customId.slice("products-page:".length));
-    return deferProductSelector(interaction, env, ctx, page, 6);
-  }
-  return ephemeral("この操作は期限切れです。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
-}
-
-function deferProductSelector(interaction, env, ctx, requestedPage, responseType) {
-  if (!ctx?.waitUntil) return productSelectorInteraction(interaction, env, requestedPage, responseType);
-  const acknowledgement = responseType === 6
-    ? { type: 6 }
-    : { type: 5, data: { flags: EPHEMERAL } };
-  ctx.waitUntil(
-    (async () => {
-      const response = await openProductSelector(interaction, env, requestedPage);
-      const payload = await response.json();
-      payload.type = RESPONSE_CHANNEL_MESSAGE;
-      await editOriginalInteractionResponse(interaction, env, payload);
-    })().catch((error) => console.error("Product selector update failed", error instanceof Error ? error.message : "unknown error")),
-  );
-  return json(acknowledgement);
-}
-
-async function editOriginalInteractionResponse(interaction, env, payload) {
-  const data = payload instanceof Response ? await payload.json() : (payload?.data ?? payload ?? {});
-  const applicationId = interaction.application_id ?? env.DISCORD_APPLICATION_ID;
-  if (!applicationId || !interaction.token) throw new Error("Missing Discord application ID or interaction token");
-  const response = await fetch(
-    "https://discord.com/api/v10/webhooks/" + encodeURIComponent(applicationId) + "/" + encodeURIComponent(interaction.token) + "/messages/@original",
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    },
-  );
-  if (!response.ok) throw new Error("Discord original-response PATCH failed: HTTP " + response.status);
-}
-
-async function productSelectorInteraction(interaction, env, requestedPage, responseType) {
-  try {
-    const response = await openProductSelector(interaction, env, requestedPage);
-    const payload = await response.json();
-    payload.type = responseType;
-    return json(payload);
-  } catch (error) {
-    console.error("Product selector response failed", error instanceof Error ? error.message : "unknown error");
-    return ephemeral("商品一覧を読み込めませんでした。もう一度お試しください。");
-  }
+  const productId = interaction.data?.values?.[0] ?? "";
+  return openPaymentModal(interaction, env, productId);
 }
 
 function deferPaymentLinkSubmission(interaction, env, ctx) {
@@ -461,7 +348,27 @@ async function webProductsJson(env) {
   }
 }
 
+let r2ProductCache;
+let r2ProductCacheExpiresAt = 0;
+
 async function listR2Products(env) {
+  const now = Date.now();
+  if (r2ProductCache && now < r2ProductCacheExpiresAt) return r2ProductCache;
+  const request = listR2ProductsUncached(env);
+  r2ProductCache = request;
+  r2ProductCacheExpiresAt = now + 60_000;
+  try {
+    return await request;
+  } catch (error) {
+    if (r2ProductCache === request) {
+      r2ProductCache = undefined;
+      r2ProductCacheExpiresAt = 0;
+    }
+    throw error;
+  }
+}
+
+async function listR2ProductsUncached(env) {
   const prefix = typeof env.PRODUCTS_PREFIX === "string" && env.PRODUCTS_PREFIX
     ? env.PRODUCTS_PREFIX
     : "products/";
@@ -480,7 +387,6 @@ async function listR2Products(env) {
   const unique = new Map(products.map((product) => [product.id, product]));
   return [...unique.values()].sort((left, right) => left.objectKey.localeCompare(right.objectKey, "ja"));
 }
-
 async function runtimeProductById(env, productId) {
   let dynamic = [];
   try {
