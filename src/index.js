@@ -346,6 +346,13 @@ async function notifyOwnerOfPendingOrder(env, order, product, receiveLink) {
       ownerId,
       "新しい注文が届きました。\\n注文番号：**" + order.code + "\\n商品：" + product.title + "\\n金額：" + formatYen(product.priceYen) + "\\n\\nPayPayでこの金額の受取を確認してください。\\n受取リンク：<" + receiveLink + ">\\n\\n確認できたら、販売チャンネルで /approve order:" + order.code + " を実行してください。",
     );
+    const claimedAt = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE orders SET claimed_at = COALESCE(claimed_at, ?), claimed_by_discord_id = COALESCE(claimed_by_discord_id, ?) WHERE id = ? AND status = 'awaiting_manual_acceptance'",
+      ).bind(claimedAt, ownerId, order.id),
+      auditStatement(env, order.id, ownerId, "payment_link_sent_to_owner", {}),
+    ]);
   } catch (error) {
     // The encrypted link remains available for the owner-only /claim fallback.
     console.error("Pending order owner DM failed", error instanceof Error ? error.message : "unknown error");
