@@ -111,15 +111,17 @@ async function handleCommand(interaction, env, ctx) {
 }
 
 function handlePurchaseCommand(interaction, env, ctx, command) {
-  // Discord interactions expire after three seconds. Returning the complete
-  // response directly is both faster and more reliable than acknowledging now
-  // and editing the original response through a second webhook request.
-  // Buyers use the posted panel button, so they do not need slash commands.
   if (command === "panel") {
     const denied = requireOwner(interaction, env);
-    return denied ?? createPurchasePanel();
+    if (denied) return denied;
+    if (!ctx?.waitUntil) return createPurchasePanel();
+    ctx.waitUntil(
+      editOriginalInteractionResponse(interaction, env, createPurchasePanelPayload())
+        .catch((error) => console.error("Panel response update failed", error instanceof Error ? error.message : "unknown error")),
+    );
+    return json({ type: 5 });
   }
-  return openProductSelector(interaction, env);
+  return deferProductSelector(interaction, env, ctx, 0, 5);
 }
 
 async function openProductSelector(interaction, env, requestedPage = 0) {
@@ -189,14 +191,18 @@ async function openPaymentModal(interaction, env, selectedProductId = null) {
   });
 }
 
-function createPurchasePanel() {
-  return json({
+function createPurchasePanelPayload() {
+  return {
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
       content: "購入する場合は、下の「商品を選ぶ」ボタンを押してください。",
       components: [actionRow({ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" })],
     },
-  });
+  };
+}
+
+function createPurchasePanel() {
+  return json(createPurchasePanelPayload());
 }
 
 async function discordApi(env, path, init = {}) {
@@ -210,7 +216,7 @@ async function handleComponentInteraction(interaction, env, ctx) {
   const customId = String(interaction.data?.custom_id ?? "");
   if (customId === "purchase-panel") {
     if (!isAllowedSalesChannel(interaction, env)) return ephemeral("購入は指定された販売チャンネルでのみ利用できます。");
-    return productSelectorInteraction(interaction, env, 0, RESPONSE_CHANNEL_MESSAGE);
+    return deferProductSelector(interaction, env, ctx, 0, 5);
   }
   if (customId.startsWith("product-select:")) {
     const productId = interaction.data?.values?.[0] ?? "";
@@ -218,9 +224,40 @@ async function handleComponentInteraction(interaction, env, ctx) {
   }
   if (customId.startsWith("products-page:")) {
     const page = Number(customId.slice("products-page:".length));
-    return productSelectorInteraction(interaction, env, page, 7);
+    return deferProductSelector(interaction, env, ctx, page, 6);
   }
   return ephemeral("この操作は期限切れです。販売パネルの「商品を選ぶ」を押して、もう一度お試しください。");
+}
+
+function deferProductSelector(interaction, env, ctx, requestedPage, responseType) {
+  if (!ctx?.waitUntil) return productSelectorInteraction(interaction, env, requestedPage, responseType);
+  const acknowledgement = responseType === 6
+    ? { type: 6 }
+    : { type: 5, data: { flags: EPHEMERAL } };
+  ctx.waitUntil(
+    (async () => {
+      const response = await openProductSelector(interaction, env, requestedPage);
+      const payload = await response.json();
+      payload.type = RESPONSE_CHANNEL_MESSAGE;
+      await editOriginalInteractionResponse(interaction, env, payload);
+    })().catch((error) => console.error("Product selector update failed", error instanceof Error ? error.message : "unknown error")),
+  );
+  return json(acknowledgement);
+}
+
+async function editOriginalInteractionResponse(interaction, env, payload) {
+  const data = payload instanceof Response ? await payload.json() : (payload?.data ?? payload ?? {});
+  const applicationId = interaction.application_id ?? env.DISCORD_APPLICATION_ID;
+  if (!applicationId || !interaction.token) throw new Error("Missing Discord application ID or interaction token");
+  const response = await fetch(
+    "https://discord.com/api/v10/webhooks/" + encodeURIComponent(applicationId) + "/" + encodeURIComponent(interaction.token) + "/messages/@original",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
+  if (!response.ok) throw new Error("Discord original-response PATCH failed: HTTP " + response.status);
 }
 
 async function productSelectorInteraction(interaction, env, requestedPage, responseType) {
