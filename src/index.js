@@ -26,6 +26,7 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/healthz") {
+      if (url.searchParams.get("refresh_panel") === "1") ctx.waitUntil(reconcilePurchasePanel(env));
       return json({ ok: true });
     }
 
