@@ -1,4 +1,5 @@
 import { PRODUCTS, findProduct, isVideoObjectKey, productFromObject } from "./catalog.js";
+import { cleanupStripeSessions, createStripeCheckoutSession, getStripeCheckoutStatus, handleStripeDownload, handleStripeWebhook, stripeBuyPage, stripeStorePage, stripeThanksPage } from "./stripe.js";
 
 const DISCORD_PING = 1;
 const DISCORD_APPLICATION_COMMAND = 2;
@@ -17,7 +18,7 @@ const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(reconcilePurchasePanel(env));
+    ctx.waitUntil(Promise.allSettled([cleanupStripeSessions(env), reconcilePurchasePanel(env)]));
   },
 
   async fetch(request, env, ctx) {
@@ -28,7 +29,46 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/") {
-      return landingPage();
+      try {
+        return stripeStorePage(await listR2Products(env));
+      } catch (error) {
+        console.error("Store unavailable", error instanceof Error ? error.message : "unknown error");
+        return new Response("Store unavailable", { status: 503 });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/buy") {
+      return stripeBuyPage(await runtimeProductById(env, url.searchParams.get("product") ?? ""), url.searchParams.get("cancelled") === "1");
+    }
+
+    if (request.method === "GET" && url.pathname === "/thanks") {
+      return stripeThanksPage(url.searchParams.get("session_id"));
+    }
+
+    if (request.method === "POST" && url.pathname === "/stripe/create-checkout") {
+      return createCheckoutFromRequest(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/stripe/webhook") {
+      try {
+        return await handleStripeWebhook(request, env);
+      } catch (error) {
+        console.error("Stripe webhook failed", error instanceof Error ? error.message : "unknown error");
+        return new Response("Webhook processing failed", { status: 500 });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/stripe/session") {
+      try {
+        return await getStripeCheckoutStatus(env, url.searchParams.get("session_id") ?? "");
+      } catch (error) {
+        console.error("Stripe session lookup failed", error instanceof Error ? error.message : "unknown error");
+        return json({ error: "unavailable" }, 503);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/stripe/download") {
+      return handleStripeDownload(env, url);
     }
 
     if (request.method === "GET" && url.pathname === "/products") {
@@ -56,10 +96,29 @@ export default {
   },
 };
 
+async function createCheckoutFromRequest(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: "invalid_request" }, 400);
+  }
+  const product = await runtimeProductById(env, payload?.productId ?? "");
+  if (!product) return json({ error: "product_not_found" }, 404);
+  try {
+    return await createStripeCheckoutSession(env, product);
+  } catch (error) {
+    console.error("Stripe Checkout creation failed", error instanceof Error ? error.message : "unknown error");
+    return json({ error: "checkout_unavailable" }, 503);
+  }
+}
+
 async function handleInteraction(interaction, env, ctx) {
   if (interaction.type === DISCORD_PING) {
     return json({ type: RESPONSE_PONG });
   }
+
+  return ephemeral("Discord内の注文受付は終了しました。販売者から届いた購入リンクを開いて、Stripeで決済してください。");
 
   if (!isAllowedGuildContext(interaction, env)) {
     return ephemeral("この販売ボットは指定された販売サーバー内でのみ利用できます。");
@@ -160,14 +219,9 @@ async function reconcilePurchasePanel(env) {
     const deleted = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(duplicate.id), { method: "DELETE" });
     if (!deleted.ok && deleted.status !== 404 && deleted.status !== 429) console.error("Could not remove duplicate purchase panel: HTTP " + deleted.status);
   }
-  if (!existing) {
-    const created = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
-      method: "POST",
-      body: JSON.stringify(panelPayload.data),
-    });
-    if (!created.ok) throw new Error("Could not create purchase panel: HTTP " + created.status);
-    return;
-  }
+  // The old PayPay panel is replaced once after deployment. Never create a
+  // replacement panel: sales now start from an externally shared Stripe link.
+  if (!existing) return;
   if (panelSignature(existing) === panelSignature(panelPayload.data)) return;
   const updated = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
     method: "PATCH",
@@ -177,28 +231,11 @@ async function reconcilePurchasePanel(env) {
 }
 
 async function createCatalogPanelPayload(env) {
-  const products = await listR2Products(env);
-  const chunks = [];
-  for (let index = 0; index < products.length; index += 25) chunks.push(products.slice(index, index + 25));
-  const components = chunks.length
-    ? chunks.map((chunk, index) => actionRow({
-        type: 3,
-        custom_id: "product-select:" + index,
-        placeholder: chunks.length === 1 ? "商品を選択" : "商品を選択（" + (index + 1) + "/" + chunks.length + "）",
-        min_values: 1,
-        max_values: 1,
-        options: chunk.map((product) => ({
-          label: truncateDiscordLabel(product.title),
-          value: product.id,
-          description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
-        })),
-      }))
-    : [actionRow({ type: 3, custom_id: "product-select:0", placeholder: "商品がありません", disabled: true, options: [{ label: "準備中", value: "unavailable" }] })];
   return {
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
-      content: "購入する動画を下の一覧から選択してください。",
-      components,
+      content: "Discord内の注文受付は終了しました。販売者から届いた購入リンクを開き、Stripeで決済してください。",
+      components: [],
     },
   };
 }
