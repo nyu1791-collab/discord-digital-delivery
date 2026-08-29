@@ -31,12 +31,8 @@ export function findProduct(productId) {
 
 export const DISCORD_COMMANDS = Object.freeze([
   { name: "claim", description: "管理者用：受取リンクを一度だけ表示します", type: 1, options: [{ name: "order", description: "注文番号", type: 3, required: true }] },
-  { name: "approve", description: "管理者用：PayPay受取確認後に配布を有効化します", type: 1, options: [
-    { name: "order", description: "注文番号", type: 3, required: true },
-    { name: "amount", description: "PayPayで実際に受け取った金額（円）", type: 4, required: true, min_value: 1 },
-  ] },
+  { name: "approve", description: "管理者用：PayPay受取確認後、購入者へ自動配布します", type: 1, options: [{ name: "order", description: "注文番号", type: 3, required: true }] },
   { name: "cancel", description: "管理者用：未承認の注文を取り消します", type: 1, options: [{ name: "order", description: "注文番号", type: 3, required: true }] },
   { name: "pending", description: "管理者用：未処理注文の一覧を表示します", type: 1 },
   { name: "status", description: "自分の注文状況を表示します", type: 1, options: [{ name: "order", description: "あなたの注文番号", type: 3, required: true }] },
-  { name: "download", description: "承認済み商品の受取リンクを表示します", type: 1, options: [{ name: "order", description: "あなたの注文番号", type: 3, required: true }] },
 ]);
