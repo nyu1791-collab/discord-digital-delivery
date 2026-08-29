@@ -44,10 +44,9 @@ Webhook署名が正しいイベントだけを受け付けます。購入者の�
 
 ## デプロイ
 
-既存のD1へ新しいテーブルを追加してからデプロイします。
+デプロイ後、初回のStripe操作時に必要なD1テーブルは自動作成されます。
 
 ```bash
-npx wrangler d1 execute discord-digital-delivery --remote --file=./migrations/0003_stripe_checkout.sql
 npm run check
 npx wrangler deploy
 ```
