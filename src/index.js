@@ -92,17 +92,13 @@ async function handleInteraction(interaction, env, ctx) {
   return ephemeral("この操作には対応していません。");
 }
 
-async function handleCommand(interaction, env) {
+async function handleCommand(interaction, env, ctx) {
   const command = interaction.data?.name;
-  if (command === "download" && !isAllowedSalesChannel(interaction, env)) {
-    return ephemeral("受取は指定された販売チャンネルでのみ利用できます。");
-  }
   if (command === "claim") return claimPaymentLink(interaction, env);
-  if (command === "approve") return approveOrder(interaction, env);
+  if (command === "approve") return approveOrder(interaction, env, ctx);
   if (command === "cancel") return cancelOrder(interaction, env);
   if (command === "pending") return listPendingOrders(interaction, env);
   if (command === "status") return showOrderStatus(interaction, env);
-  if (command === "download") return createDownloadLink(interaction, env);
   return ephemeral("未知のコマンドです。");
 }
 
@@ -268,7 +264,7 @@ function deferPaymentLinkSubmission(interaction, env, ctx) {
   return ephemeral("受取リンクを受信しました。処理完了後、BotからDMで結果をお送りします。");
 }
 
-async function sendDiscordDm(env, userId, content) {
+async function sendDiscordDm(env, userId, content, components = []) {
   if (!userId) throw new Error("Missing buyer Discord ID");
   const dm = await discordApi(env, "/users/@me/channels", {
     method: "POST",
@@ -276,9 +272,11 @@ async function sendDiscordDm(env, userId, content) {
   });
   if (!dm.ok) throw new Error("Could not open buyer DM: HTTP " + dm.status);
   const channel = await dm.json();
+  const payload = { content: String(content).slice(0, 1900) };
+  if (components.length) payload.components = components;
   const message = await discordApi(env, "/channels/" + encodeURIComponent(channel.id) + "/messages", {
     method: "POST",
-    body: JSON.stringify({ content: String(content).slice(0, 1900) }),
+    body: JSON.stringify(payload),
   });
   if (!message.ok) throw new Error("Could not send buyer DM: HTTP " + message.status);
 }
@@ -288,7 +286,7 @@ async function handlePaymentLinkSubmission(interaction, env) {
     ? customId.slice("paypay-receive-link:".length)
     : "";
   const product = await runtimeProductById(env, productId);
-  if (!product) return ephemeral("商品情報を確認できませんでした。商品一覧からもう一度 /buy からやり直してください。");
+  if (!product) return ephemeral("商品情報を確認できませんでした。販売パネルからもう一度お試しください。");
 
   const submitted = modalValue(interaction, "paypay_receive_link");
   const receiveLink = extractPayPayReceiveLink(submitted);
@@ -443,11 +441,11 @@ async function claimPaymentLink(interaction, env) {
   return ephemeral(
     `注文：${order.code}\n商品：${terms?.productTitle ?? order.product_id}\n確認額：${formatYen(terms?.priceYen ?? 0)}\n\n` +
       `受取リンク（管理者だけに表示）：\n<${link}>\n\n` +
-      "PayPayアプリで金額と受取完了を確認してから、/approve order:注文番号 amount:実額 を実行してください。",
+      "PayPayアプリで受取完了を確認してから、/approve order:注文番号 を実行してください。",
   );
 }
 
-async function approveOrder(interaction, env) {
+async function approveOrder(interaction, env, ctx) {
   const denied = requireOwner(interaction, env);
   if (denied) return denied;
   const order = await orderByCode(env, optionValue(interaction, "order"));
@@ -455,21 +453,19 @@ async function approveOrder(interaction, env) {
   if (order.status !== "awaiting_manual_acceptance") return ephemeral(`この注文は ${order.status} 状態です。`);
   if (!order.claimed_at) return ephemeral("先に /claim で受取リンクを確認し、PayPayで受取完了を確認してください。");
   const terms = await deliveryTermsForOrder(env, order);
-  const confirmedAmount = Number(optionValue(interaction, "amount"));
-  if (!terms || !Number.isSafeInteger(confirmedAmount) || confirmedAmount !== terms.priceYen) {
-    return ephemeral(`金額が一致しないため承認を停止しました。PayPayの受取額を確認し、${formatYen(terms?.priceYen ?? 0)}ちょうどの場合だけ再実行してください。`);
-  }
+  if (!terms) return ephemeral("商品情報を確認できないため、承認を停止しました。");
   if (Date.parse(order.expires_at) <= Date.now()) {
     await expireOrder(env, order.id);
     return ephemeral("確認期限が切れています。承認できません。");
   }
 
   const ownerId = interaction.member?.user?.id ?? interaction.user?.id;
+  const confirmedAt = new Date().toISOString();
   const result = await env.DB.prepare(
     `UPDATE orders
        SET status = 'approved', approved_at = ?, approved_by_discord_id = ?, paypay_receive_link_ciphertext = ''
      WHERE id = ? AND status = 'awaiting_manual_acceptance' AND claimed_at IS NOT NULL`,
-  ).bind(new Date().toISOString(), ownerId, order.id).run();
+  ).bind(confirmedAt, ownerId, order.id).run();
 
   if (result.meta.changes !== 1) return ephemeral("この注文は別の操作で更新されました。/claim で状態を確認してください。");
   await env.DB.batch([
@@ -477,12 +473,33 @@ async function approveOrder(interaction, env) {
       `INSERT OR REPLACE INTO order_payment_confirmations (
         order_id, confirmed_amount_yen, confirmed_at, confirmed_by_discord_id
       ) VALUES (?, ?, ?, ?)`,
-    ).bind(order.id, confirmedAmount, new Date().toISOString(), ownerId),
+    ).bind(order.id, terms.priceYen, confirmedAt, ownerId),
     env.DB.prepare("DELETE FROM pending_order_locks WHERE buyer_discord_id = ? AND product_id = ? AND order_id = ?")
       .bind(order.buyer_discord_id, order.product_id, order.id),
-    auditStatement(env, order.id, ownerId, "delivery_approved", { confirmedAmountYen: confirmedAmount }),
+    auditStatement(env, order.id, ownerId, "delivery_approved", { confirmedAmountYen: terms.priceYen }),
   ]);
-  return ephemeral(`承認しました。購入者は /download order:${order.code} で、期限付きの受取リンクを表示できます。`);
+
+  const delivery = deliverApprovedOrder(env, order, terms);
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(delivery);
+  } else {
+    await delivery;
+  }
+  return ephemeral("承認しました。購入者へ動画の受取ボタンをDMで送信します。");
+}
+
+async function deliverApprovedOrder(env, order, terms) {
+  try {
+    const link = await signedDownloadUrl(env, order, terms);
+    await sendDiscordDm(
+      env,
+      order.buyer_discord_id,
+      `お支払いを確認しました。\\n商品：${terms.productTitle}\\n下の「動画を受け取る」ボタンから受け取れます。\\n受取リンクは10分間有効です。残り回数：${Math.max(0, terms.maxDownloads - order.download_uses)}回`,
+      [actionRow({ type: 2, style: 5, label: "動画を受け取る", url: link })],
+    );
+  } catch (error) {
+    console.error("Approved delivery DM failed", error instanceof Error ? error.message : "unknown error");
+  }
 }
 
 async function cancelOrder(interaction, env) {
@@ -544,33 +561,14 @@ async function showOrderStatus(interaction, env) {
   return ephemeral(`注文番号：${order.code}\n商品：${terms?.productTitle ?? order.product_id}\n金額：${formatYen(terms?.priceYen ?? 0)}\n状態：${statusText}\n${downloadText}`);
 }
 
-async function createDownloadLink(interaction, env) {
-  const order = await orderByCode(env, optionValue(interaction, "order"));
-  if (!order) return ephemeral("注文が見つかりません。");
-  const userId = interaction.member?.user?.id ?? interaction.user?.id;
-  if (order.buyer_discord_id !== userId) return ephemeral("この注文の受取リンクは購入者本人だけが表示できます。");
-  if (order.status !== "approved") return ephemeral("まだ配布可能ではありません。PayPay受取確認後に有効になります。");
-  const terms = await deliveryTermsForOrder(env, order);
-  if (!terms) return ephemeral("商品ファイルの設定を確認できません。管理者へ連絡してください。");
-  if (order.download_uses >= terms.maxDownloads) return ephemeral("この注文のダウンロード上限に達しています。必要な場合は管理者へ連絡してください。");
-
+async function signedDownloadUrl(env, order, terms) {
   const expires = Math.floor(Date.now() / 1000) + DOWNLOAD_TTL_SECONDS;
   const signature = await signDownload(order.id, expires, env.PRODUCT_DOWNLOAD_SIGNING_KEY);
   const link = new URL("/download", env.PUBLIC_BASE_URL);
   link.searchParams.set("order", order.id);
   link.searchParams.set("expires", String(expires));
   link.searchParams.set("sig", signature);
-
-  return json({
-    type: RESPONSE_CHANNEL_MESSAGE,
-    data: {
-      flags: EPHEMERAL,
-      content: `受取リンクは10分間有効です。残り回数：${terms.maxDownloads - order.download_uses}回`,
-      components: [
-        actionRow({ type: 2, style: 5, label: "動画を受け取る", url: link.toString() }),
-      ],
-    },
-  });
+  return link.toString();
 }
 
 async function handleDownload(request, env, url) {
@@ -1006,7 +1004,7 @@ function landingPage() {
     <article class="product">
       <h2>${escapeHtml(product.title)}</h2>
       <p class="price">${formatYen(product.priceYen)}</p>
-      <p>Discordの <code>/buy</code> から注文します。ダウンロード上限：${product.maxDownloads}回</p>
+      <p>Discordの販売パネルから注文します。ダウンロード上限：${product.maxDownloads}回</p>
     </article>`).join("");
   const html = `<!doctype html>
 <html lang="ja">
@@ -1033,9 +1031,9 @@ function landingPage() {
   <body><main>
     <p class="tag">DISCORD DIGITAL DELIVERY</p>
     <h1>デジタル商品 配布所</h1>
-    <p class="lead">購入と受取はDiscord内で完結します。PayPay受取リンクは、注文確認のためだけに暗号化して短時間保存され、管理者が手動で受取確認した後にダウンロードが有効になります。</p>
+    <p class="lead">購入と受取はDiscord内で完結します。PayPay受取リンクは、注文確認のためだけに暗号化して短時間保存され、管理者が手動で受取確認すると、Botが購入者へ受取ボタンをDM送信します。</p>
     <section aria-label="商品一覧">${products}</section>
-    <section class="steps"><h2>購入方法</h2><ol><li>販売用Discordチャンネルで <code>/buy</code> を実行</li><li>PayPay受取リンクをフォームへ貼り付け</li><li>管理者の受取確認後、<code>/download</code> で動画を受け取る</li></ol></section>
+    <section class="steps"><h2>購入方法</h2><ol><li>販売用Discordチャンネルで商品を選ぶ</li><li>PayPay受取リンクをフォームへ貼り付け</li><li>管理者の確認後、BotのDMから動画を受け取る</li></ol></section>
     <p class="notice">PayPayのログイン情報、暗証番号、受取リンクのパスワードは送らないでください。受取リンクの自動受取・自動承認は行いません。</p>
   </main></body>
 </html>`;
