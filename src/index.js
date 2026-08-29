@@ -225,32 +225,50 @@ async function handleComponentInteraction(interaction, env) {
   const customId = String(interaction.data?.custom_id ?? "");
   const denied = requireOwner(interaction, env);
   if (denied) return denied;
-  if (customId === "manual-share-panel") return manualSharePicker(env);
-  if (customId.startsWith("manual-share-select:")) {
-    const product = await runtimeProductById(env, interaction.data?.values?.[0] ?? "");
+  if (customId === "manual-share-panel") return manualSharePicker(env, 0);
+  if (customId.startsWith("manual-share-page:")) {
+    return manualSharePicker(env, Number(customId.slice("manual-share-page:".length)));
+  }
+  if (customId.startsWith("manual-share-file:")) {
+    const index = Number(customId.slice("manual-share-file:".length));
+    const products = await listR2Products(env);
+    const product = Number.isSafeInteger(index) ? products[index] : null;
     if (!product) return ephemeral("動画が見つかりません。管理パネルを開き直してください。");
     const link = await createManualShareLink(env, product);
-    return ephemeral(`送信用リンクを発行しました（24時間・最大3回）。\n商品：${product.title}\n\n<${link}>\n\nこのリンクだけをXのDMへ貼り付けてください。`);
+    return ephemeral(`送信用リンクを発行しました（24時間・最大3回）。\n${index + 1}番：${product.title}\n\n<${link}>\n\nこのリンクだけをXのDMへ貼り付けてください。`);
   }
   return ephemeral("この操作は期限切れです。管理パネルから開き直してください。");
 }
 
-async function manualSharePicker(env) {
+async function manualSharePicker(env, requestedPage) {
   const products = await listR2Products(env);
   if (!products.length) return ephemeral("配布できる動画がありません。");
+  const pageSize = 20;
+  const pageCount = Math.ceil(products.length / pageSize);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage >= 0 && requestedPage < pageCount ? requestedPage : 0;
+  const startIndex = page * pageSize;
+  const pageProducts = products.slice(startIndex, startIndex + pageSize);
   const rows = [];
-  for (let index = 0; index < products.length; index += 25) {
-    const chunk = products.slice(index, index + 25);
-    rows.push(actionRow({
-      type: 3,
-      custom_id: "manual-share-select:" + (index / 25),
-      placeholder: products.length > 25 ? "動画を選択（" + (index / 25 + 1) + "/" + Math.ceil(products.length / 25) + "）" : "送る動画を選択",
-      min_values: 1,
-      max_values: 1,
-      options: chunk.map((product) => ({ label: truncateDiscordLabel(product.title), value: product.id })),
-    }));
+  for (let offset = 0; offset < pageProducts.length; offset += 5) {
+    rows.push({
+      type: 1,
+      components: pageProducts.slice(offset, offset + 5).map((_, localIndex) => {
+        const index = startIndex + offset + localIndex;
+        return { type: 2, style: 2, label: String(index + 1), custom_id: "manual-share-file:" + index };
+      }),
+    });
   }
-  return ephemeralComponentMessage("PayPayの受取確認後、Xで送る動画を選んでください。リンクは24時間・最大3回まで有効です。", rows);
+  if (pageCount > 1) {
+    const navigation = [];
+    if (page > 0) navigation.push({ type: 2, style: 2, label: "前のページ", custom_id: "manual-share-page:" + (page - 1) });
+    if (page < pageCount - 1) navigation.push({ type: 2, style: 2, label: "次のページ", custom_id: "manual-share-page:" + (page + 1) });
+    rows.push({ type: 1, components: navigation });
+  }
+  const list = pageProducts.map((product, localIndex) => `${startIndex + localIndex + 1}. ${product.title}`).join("\n");
+  return ephemeralComponentMessage(
+    `PayPayの受取確認後、番号を1回押すだけで送信用リンクを発行します（${page + 1}/${pageCount}）。\n\n${list}\n\nリンクは24時間・最大3回まで有効です。`,
+    rows,
+  );
 }
 
 let manualShareSchemaPromise;
