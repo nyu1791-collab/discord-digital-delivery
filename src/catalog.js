@@ -33,6 +33,7 @@ export const DISCORD_COMMANDS = Object.freeze([
   { name: "buy", description: "商品を選び、PayPay受取リンクを送信します", type: 1 },
   { name: "shop", description: "購入画面を開きます（buyの簡単版）", type: 1 },
   { name: "panel", description: "管理者用：購入ボタンを販売チャンネルに設置します", type: 1 },
+  { name: "setup", description: "管理者用：購入ボタンを常設します（購入者はコマンド不要）", type: 1 },
   { name: "claim", description: "管理者用：受取リンクを一度だけ表示します", type: 1, options: [{ name: "order", description: "注文番号", type: 3, required: true }] },
   { name: "approve", description: "管理者用：PayPay受取確認後に配布を有効化します", type: 1, options: [
     { name: "order", description: "注文番号", type: 3, required: true },
