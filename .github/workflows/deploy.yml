@@ -89,6 +89,16 @@ jobs:
           test -n "$DISCORD_BOT_TOKEN"
           node ./scripts/register-commands.mjs
 
+      - name: Synchronize persistent purchase panel
+        env:
+          DISCORD_APPLICATION_ID: "1542748509034389626"
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_SALES_CHANNEL_ID: "1542767816371867690"
+        run: |
+          set -euo pipefail
+          test -n "$DISCORD_BOT_TOKEN"
+          node ./scripts/sync-panel.mjs
+
       - name: Configure Discord interaction verification key
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
