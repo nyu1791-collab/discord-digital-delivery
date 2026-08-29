@@ -31,8 +31,10 @@ export default {
           await reconcilePurchasePanel(env);
           return json({ ok: true, panel: "refreshed" });
         } catch (error) {
-          console.error("Manual panel refresh failed", error instanceof Error ? error.message : "unknown error");
-          return json({ ok: false, panel: "not_refreshed" }, 503);
+          const message = error instanceof Error ? error.message : "unknown error";
+          console.error("Manual panel refresh failed", message);
+          const cause = message === "Panel reconciliation is not configured" ? "missing_bot_token_or_channel" : "discord_bot_api_or_permissions";
+          return json({ ok: false, panel: "not_refreshed", cause }, 503);
         }
       }
       return json({ ok: true });
