@@ -18,7 +18,7 @@ const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(cleanupStripeSessions(env));
+    ctx.waitUntil(Promise.allSettled([cleanupStripeSessions(env), reconcilePurchasePanel(env)]));
   },
 
   async fetch(request, env, ctx) {
@@ -219,14 +219,9 @@ async function reconcilePurchasePanel(env) {
     const deleted = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(duplicate.id), { method: "DELETE" });
     if (!deleted.ok && deleted.status !== 404 && deleted.status !== 429) console.error("Could not remove duplicate purchase panel: HTTP " + deleted.status);
   }
-  if (!existing) {
-    const created = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
-      method: "POST",
-      body: JSON.stringify(panelPayload.data),
-    });
-    if (!created.ok) throw new Error("Could not create purchase panel: HTTP " + created.status);
-    return;
-  }
+  // The old PayPay panel is replaced once after deployment. Never create a
+  // replacement panel: sales now start from an externally shared Stripe link.
+  if (!existing) return;
   if (panelSignature(existing) === panelSignature(panelPayload.data)) return;
   const updated = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
     method: "PATCH",
@@ -236,28 +231,11 @@ async function reconcilePurchasePanel(env) {
 }
 
 async function createCatalogPanelPayload(env) {
-  const products = await listR2Products(env);
-  const chunks = [];
-  for (let index = 0; index < products.length; index += 25) chunks.push(products.slice(index, index + 25));
-  const components = chunks.length
-    ? chunks.map((chunk, index) => actionRow({
-        type: 3,
-        custom_id: "product-select:" + index,
-        placeholder: chunks.length === 1 ? "商品を選択" : "商品を選択（" + (index + 1) + "/" + chunks.length + "）",
-        min_values: 1,
-        max_values: 1,
-        options: chunk.map((product) => ({
-          label: truncateDiscordLabel(product.title),
-          value: product.id,
-          description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
-        })),
-      }))
-    : [actionRow({ type: 3, custom_id: "product-select:0", placeholder: "商品がありません", disabled: true, options: [{ label: "準備中", value: "unavailable" }] })];
   return {
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
-      content: "購入する動画を下の一覧から選択してください。",
-      components,
+      content: "Discord内の注文受付は終了しました。販売者から届いた購入リンクを開き、Stripeで決済してください。",
+      components: [],
     },
   };
 }
