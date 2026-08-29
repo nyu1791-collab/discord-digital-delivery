@@ -110,27 +110,16 @@ async function handleCommand(interaction, env, ctx) {
   return ephemeral("未知のコマンドです。");
 }
 
-async function handlePurchaseCommand(interaction, env, ctx, command) {
+function handlePurchaseCommand(interaction, env, ctx, command) {
+  // Discord interactions expire after three seconds. Returning the complete
+  // response directly is both faster and more reliable than acknowledging now
+  // and editing the original response through a second webhook request.
+  // Buyers use the posted panel button, so they do not need slash commands.
   if (command === "panel") {
     const denied = requireOwner(interaction, env);
-    if (denied) return denied;
-    return deferPurchasePanel(interaction, env, ctx);
+    return denied ?? createPurchasePanel();
   }
-  return deferProductSelector(interaction, env, ctx);
-}
-
-function deferProductSelector(interaction, env, ctx, requestedPage = 0, responseType = 5) {
-  if (!ctx?.waitUntil) return openProductSelector(interaction, env);
-  ctx.waitUntil((async () => {
-    try {
-      const response = await openProductSelector(interaction, env, requestedPage);
-      await editOriginalInteractionResponse(interaction, env, response);
-    } catch (error) {
-      console.error("Deferred product selector failed", error instanceof Error ? error.message : "unknown error");
-      await editOriginalInteractionResponse(interaction, env, ephemeral("商品一覧を読み込めませんでした。もう一度お試しください。"));
-    }
-  })());
-  return responseType === 6 ? json({ type: 6 }) : json({ type: 5, data: { flags: EPHEMERAL } });
+  return openProductSelector(interaction, env);
 }
 
 async function openProductSelector(interaction, env, requestedPage = 0) {
@@ -200,7 +189,7 @@ async function openPaymentModal(interaction, env, selectedProductId = null) {
   });
 }
 
-async function createPurchasePanel(interaction, env) {
+function createPurchasePanel() {
   return json({
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
@@ -208,44 +197,6 @@ async function createPurchasePanel(interaction, env) {
       components: [actionRow({ type: 2, style: 1, label: "商品を選ぶ", custom_id: "purchase-panel" })],
     },
   });
-}
-
-function deferPurchasePanel(interaction, env, ctx) {
-  if (!ctx?.waitUntil) return createPurchasePanel(interaction, env);
-  ctx.waitUntil((async () => {
-    try {
-      const response = await createPurchasePanel(interaction, env);
-      await editOriginalInteractionResponse(interaction, env, response);
-    } catch (error) {
-      console.error("Deferred purchase panel failed", error instanceof Error ? error.message : "unknown error");
-      try {
-        await editOriginalInteractionResponse(
-          interaction,
-          env,
-          ephemeral("販売パネルを表示できませんでした。もう一度 /panel を実行してください。"),
-        );
-      } catch (editError) {
-        console.error("Deferred purchase panel error update failed", editError instanceof Error ? editError.message : "unknown error");
-      }
-    }
-  })());
-  return json({ type: 5 });
-}
-
-async function editOriginalInteractionResponse(interaction, env, response) {
-  const data = response?.data ?? {};
-  const url = "https://discord.com/api/v10/webhooks/" +
-    encodeURIComponent(String(interaction.application_id ?? "")) + "/" +
-    encodeURIComponent(String(interaction.token ?? "")) + "/messages/@original";
-  const result = await fetch(url, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!result.ok) {
-    const detail = await result.text().catch(() => "");
-    throw new Error("Interaction response update failed (" + result.status + "): " + detail.slice(0, 300));
-  }
 }
 
 async function discordApi(env, path, init = {}) {
