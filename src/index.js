@@ -845,9 +845,28 @@ async function expireStaleOrders(env, now) {
   await env.DB.batch(statements);
 }
 
+let processedInteractionSchemaPromise;
+async function ensureProcessedInteractionSchema(env) {
+  if (!env.DB) throw new Error("D1 database binding is not configured");
+  if (!processedInteractionSchemaPromise) {
+    processedInteractionSchemaPromise = env.DB.batch([
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS processed_discord_interactions (
+        interaction_id TEXT PRIMARY KEY,
+        processed_at TEXT NOT NULL
+      )`),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS processed_discord_interactions_processed_at_idx ON processed_discord_interactions (processed_at)"),
+    ]).catch((error) => {
+      processedInteractionSchemaPromise = undefined;
+      throw error;
+    });
+  }
+  await processedInteractionSchemaPromise;
+}
+
 async function markInteractionAsNew(interaction, env) {
   const interactionId = String(interaction.id ?? "");
   if (!/^\d{15,25}$/.test(interactionId)) return false;
+  await ensureProcessedInteractionSchema(env);
   const now = new Date();
   const result = await env.DB.prepare(
     "INSERT OR IGNORE INTO processed_discord_interactions (interaction_id, processed_at) VALUES (?, ?)",
