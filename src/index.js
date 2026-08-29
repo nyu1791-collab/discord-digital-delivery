@@ -14,10 +14,12 @@ const DISCORD_SIGNATURE_MAX_AGE_MS = 5 * 60 * 1000;
 const DISCORD_SIGNATURE_MAX_FUTURE_SKEW_MS = 60 * 1000;
 const PROCESSED_INTERACTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_PENDING_ORDERS_TO_CLEAN = 50;
+const MANUAL_SHARE_TTL_MS = 24 * 60 * 60 * 1000;
+const MANUAL_SHARE_MAX_DOWNLOADS = 3;
 
 export default {
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(reconcilePurchasePanel(env));
+    ctx.waitUntil(Promise.allSettled([reconcilePurchasePanel(env), cleanupExpiredManualShares(env)]));
   },
 
   async fetch(request, env, ctx) {
@@ -37,6 +39,10 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/download") {
       return handleDownload(request, env, url);
+    }
+
+    if (request.method === "GET" && url.pathname === "/share") {
+      return handleManualShareDownload(env, url);
     }
 
     if (request.method !== "POST" || url.pathname !== "/discord/interactions") {
@@ -151,7 +157,7 @@ async function reconcilePurchasePanel(env) {
   const messages = await listResponse.json();
   const panelMessages = messages.filter((message) =>
     (message.components || []).some((row) =>
-      (row.components || []).some((component) => component.custom_id === "purchase-panel" || component.custom_id?.startsWith("product-select:")),
+      (row.components || []).some((component) => component.custom_id === "purchase-panel" || component.custom_id === "manual-share-panel" || component.custom_id?.startsWith("product-select:")),
     ),
   );
   const existing = panelMessages[0];
@@ -177,28 +183,11 @@ async function reconcilePurchasePanel(env) {
 }
 
 async function createCatalogPanelPayload(env) {
-  const products = await listR2Products(env);
-  const chunks = [];
-  for (let index = 0; index < products.length; index += 25) chunks.push(products.slice(index, index + 25));
-  const components = chunks.length
-    ? chunks.map((chunk, index) => actionRow({
-        type: 3,
-        custom_id: "product-select:" + index,
-        placeholder: chunks.length === 1 ? "商品を選択" : "商品を選択（" + (index + 1) + "/" + chunks.length + "）",
-        min_values: 1,
-        max_values: 1,
-        options: chunk.map((product) => ({
-          label: truncateDiscordLabel(product.title),
-          value: product.id,
-          description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
-        })),
-      }))
-    : [actionRow({ type: 3, custom_id: "product-select:0", placeholder: "商品がありません", disabled: true, options: [{ label: "準備中", value: "unavailable" }] })];
   return {
     type: RESPONSE_CHANNEL_MESSAGE,
     data: {
-      content: "購入する動画を下の一覧から選択してください。",
-      components,
+      content: "管理者用：PayPayの受取を確認後、「送信用リンクを発行」を押して動画を選んでください。発行したリンクをそのままXのDMへ貼り付けられます。",
+      components: [actionRow({ type: 2, style: 1, label: "送信用リンクを発行", custom_id: "manual-share-panel" })],
     },
   };
 }
@@ -232,13 +221,97 @@ async function discordApi(env, path, init = {}) {
   return fetch("https://discord.com/api/v10" + path, { ...init, headers });
 }
 
-function handleComponentInteraction(interaction, env) {
+async function handleComponentInteraction(interaction, env) {
   const customId = String(interaction.data?.custom_id ?? "");
-  if (!customId.startsWith("product-select:")) {
-    return ephemeral("この操作は期限切れです。最新の商品一覧から選び直してください。");
+  const denied = requireOwner(interaction, env);
+  if (denied) return denied;
+  if (customId === "manual-share-panel") return manualSharePicker(env);
+  if (customId.startsWith("manual-share-select:")) {
+    const product = await runtimeProductById(env, interaction.data?.values?.[0] ?? "");
+    if (!product) return ephemeral("動画が見つかりません。管理パネルを開き直してください。");
+    const link = await createManualShareLink(env, product);
+    return ephemeral(`送信用リンクを発行しました（24時間・最大3回）。\n商品：${product.title}\n\n<${link}>\n\nこのリンクだけをXのDMへ貼り付けてください。`);
   }
-  const productId = interaction.data?.values?.[0] ?? "";
-  return openPaymentModal(interaction, env, productId);
+  return ephemeral("この操作は期限切れです。管理パネルから開き直してください。");
+}
+
+async function manualSharePicker(env) {
+  const products = await listR2Products(env);
+  if (!products.length) return ephemeral("配布できる動画がありません。");
+  const rows = [];
+  for (let index = 0; index < products.length; index += 25) {
+    const chunk = products.slice(index, index + 25);
+    rows.push(actionRow({
+      type: 3,
+      custom_id: "manual-share-select:" + (index / 25),
+      placeholder: products.length > 25 ? "動画を選択（" + (index / 25 + 1) + "/" + Math.ceil(products.length / 25) + "）" : "送る動画を選択",
+      min_values: 1,
+      max_values: 1,
+      options: chunk.map((product) => ({ label: truncateDiscordLabel(product.title), value: product.id })),
+    }));
+  }
+  return ephemeralComponentMessage("PayPayの受取確認後、Xで送る動画を選んでください。リンクは24時間・最大3回まで有効です。", rows);
+}
+
+let manualShareSchemaPromise;
+async function ensureManualShareSchema(env) {
+  if (!manualShareSchemaPromise) {
+    manualShareSchemaPromise = env.DB.batch([
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS manual_share_links (
+        token TEXT PRIMARY KEY,
+        product_title TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        download_name TEXT NOT NULL,
+        max_downloads INTEGER NOT NULL,
+        download_uses INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_downloaded_at TEXT
+      )`),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS manual_share_links_expiry_idx ON manual_share_links (expires_at)"),
+    ]).catch((error) => { manualShareSchemaPromise = undefined; throw error; });
+  }
+  await manualShareSchemaPromise;
+}
+
+async function createManualShareLink(env, product) {
+  await ensureManualShareSchema(env);
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + MANUAL_SHARE_TTL_MS).toISOString();
+  await env.DB.prepare(
+    "INSERT INTO manual_share_links (token, product_title, object_key, download_name, max_downloads, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).bind(token, product.title, product.objectKey, product.downloadName, MANUAL_SHARE_MAX_DOWNLOADS, expiresAt, now.toISOString()).run();
+  const base = String(env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
+  if (!/^https:\/\//.test(base)) throw new Error("PUBLIC_BASE_URL is not configured");
+  return base + "/share?token=" + encodeURIComponent(token);
+}
+
+async function handleManualShareDownload(env, url) {
+  const token = url.searchParams.get("token") ?? "";
+  if (!isUuid(token)) return new Response("Invalid link", { status: 404 });
+  await ensureManualShareSchema(env);
+  const link = await env.DB.prepare("SELECT * FROM manual_share_links WHERE token = ?").bind(token).first();
+  if (!link) return new Response("Link unavailable", { status: 404 });
+  if (Date.parse(link.expires_at) <= Date.now()) return new Response("Link expired", { status: 410 });
+  const object = await env.PRODUCT_ASSETS.get(link.object_key);
+  if (!object) return new Response("File unavailable", { status: 404 });
+  const result = await env.DB.prepare(
+    "UPDATE manual_share_links SET download_uses = download_uses + 1, last_downloaded_at = ? WHERE token = ? AND download_uses < ? AND expires_at > ?",
+  ).bind(new Date().toISOString(), token, link.max_downloads, new Date().toISOString()).run();
+  if (result.meta.changes !== 1) return new Response("Download limit reached", { status: 429 });
+  const headers = new Headers();
+  headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
+  headers.set("Content-Disposition", contentDispositionAttachment(link.download_name));
+  headers.set("Cache-Control", "private, no-store, max-age=0");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(object.body, { headers });
+}
+
+async function cleanupExpiredManualShares(env) {
+  await ensureManualShareSchema(env);
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare("DELETE FROM manual_share_links WHERE expires_at < ?").bind(cutoff).run();
 }
 
 function deferPaymentLinkSubmission(interaction, env, ctx) {
