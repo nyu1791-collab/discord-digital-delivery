@@ -327,6 +327,8 @@ async function handlePaymentLinkSubmission(interaction, env) {
   if (order.kind !== "created") {
     throw new Error("Could not create a unique order");
   }
+  await notifyOwnerOfPendingOrder(env, order, product, receiveLink);
+
 
   return ephemeral(
     `注文を受け付けました。\n注文番号：**${order.code}**\n商品：${product.title}（${formatYen(product.priceYen)}）\n` +
@@ -335,6 +337,20 @@ async function handlePaymentLinkSubmission(interaction, env) {
   );
 }
 
+async function notifyOwnerOfPendingOrder(env, order, product, receiveLink) {
+  const ownerId = String(env.OWNER_DISCORD_ID ?? "").trim();
+  if (!ownerId) return;
+  try {
+    await sendDiscordDm(
+      env,
+      ownerId,
+      "新しい注文が届きました。\\n注文番号：**" + order.code + "\\n商品：" + product.title + "\\n金額：" + formatYen(product.priceYen) + "\\n\\nPayPayでこの金額の受取を確認してください。\\n受取リンク：<" + receiveLink + ">\\n\\n確認できたら、販売チャンネルで /approve order:" + order.code + " を実行してください。",
+    );
+  } catch (error) {
+    // The encrypted link remains available for the owner-only /claim fallback.
+    console.error("Pending order owner DM failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
 async function webProductsJson(env) {
   try {
     const products = await listR2Products(env);
@@ -422,11 +438,10 @@ async function claimPaymentLink(interaction, env) {
     await expireOrder(env, order.id);
     return ephemeral("この注文の確認時間（30分）が切れました。購入者に新しい受取リンクを送ってもらってください。");
   }
-  if (order.claimed_at) {
-    return ephemeral("この注文の受取リンクはすでに管理者へ一度だけ表示しました。PayPayの受取完了を確認できた場合は /approve、やり直す場合は /cancel を実行してください。");
-  }
-
   const ownerId = interaction.member?.user?.id ?? interaction.user?.id;
+  if (order.claimed_at && order.claimed_by_discord_id !== ownerId) {
+    return ephemeral("この注文の受取リンクはすでに管理者へ表示されています。");
+  }
   const link = await decryptReceiveLink(order.paypay_receive_link_ciphertext, env.PAYPAY_LINK_ENCRYPTION_KEY);
   await env.DB.batch([
     env.DB.prepare(
@@ -451,7 +466,7 @@ async function approveOrder(interaction, env, ctx) {
   const order = await orderByCode(env, optionValue(interaction, "order"));
   if (!order) return ephemeral("注文が見つかりません。");
   if (order.status !== "awaiting_manual_acceptance") return ephemeral(`この注文は ${order.status} 状態です。`);
-  if (!order.claimed_at) return ephemeral("先に /claim で受取リンクを確認し、PayPayで受取完了を確認してください。");
+  if (!order.claimed_at) return ephemeral("注文通知DMまたは /claim で受取リンクを確認してから実行してください。");
   const terms = await deliveryTermsForOrder(env, order);
   if (!terms) return ephemeral("商品情報を確認できないため、承認を停止しました。");
   if (Date.parse(order.expires_at) <= Date.now()) {
