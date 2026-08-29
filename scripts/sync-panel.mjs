@@ -53,11 +53,16 @@ const panel = {
 const listResponse = await api("/channels/" + channelId + "/messages?limit=100");
 if (!listResponse.ok) throw new Error("Could not read sales channel messages: " + listResponse.status);
 const messages = await listResponse.json();
-const existing = messages.find((message) =>
+const panelMessages = messages.filter((message) =>
   (message.components || []).some((row) =>
-    (row.components || []).some((component) => component.custom_id === "purchase-panel"),
+    (row.components || []).some((component) => component.custom_id === "purchase-panel" || component.custom_id?.startsWith("product-select:")),
   ),
 );
+const existing = panelMessages[0];
+for (const duplicate of panelMessages.slice(1)) {
+  const deleted = await api("/channels/" + channelId + "/messages/" + duplicate.id, { method: "DELETE" });
+  if (!deleted.ok && deleted.status !== 404) throw new Error("Could not remove duplicate purchase panel: " + deleted.status);
+}
 
 const response = existing
   ? await api("/channels/" + channelId + "/messages/" + existing.id, { method: "PATCH", body: JSON.stringify(panel) })
