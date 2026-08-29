@@ -845,7 +845,7 @@ async function expireStaleOrders(env, now) {
   await env.DB.batch(statements);
 }
 
-async let processedInteractionSchemaPromise;
+let processedInteractionSchemaPromise;
 async function ensureProcessedInteractionSchema(env) {
   if (!env.DB) throw new Error("D1 database binding is not configured");
   if (!processedInteractionSchemaPromise) {
