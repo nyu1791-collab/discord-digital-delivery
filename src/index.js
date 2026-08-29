@@ -69,7 +69,7 @@ async function handleInteraction(interaction, env, ctx) {
   // only adds latency and can produce "application did not respond".
   const readOnlyInteraction =
     (interaction.type === DISCORD_APPLICATION_COMMAND &&
-      ["panel", "buy", "shop"].includes(commandName)) ||
+      ["panel", "buy", "shop", "setup"].includes(commandName)) ||
     interaction.type === DISCORD_MODAL_SUBMIT ||
     (interaction.type === DISCORD_MESSAGE_COMPONENT &&
       (componentId === "purchase-panel" ||
