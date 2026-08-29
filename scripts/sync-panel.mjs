@@ -61,7 +61,8 @@ const panelMessages = messages.filter((message) =>
 const existing = panelMessages[0];
 for (const duplicate of panelMessages.slice(1)) {
   const deleted = await api("/channels/" + channelId + "/messages/" + duplicate.id, { method: "DELETE" });
-  if (!deleted.ok && deleted.status !== 404) throw new Error("Could not remove duplicate purchase panel: " + deleted.status);
+  if (!deleted.ok && deleted.status !== 404 && deleted.status !== 429) throw new Error("Could not remove duplicate purchase panel: " + deleted.status);
+  if (deleted.status === 429) console.warn("Discord rate limit while removing a duplicate panel; scheduled reconciliation will retry.");
 }
 
 const response = existing
