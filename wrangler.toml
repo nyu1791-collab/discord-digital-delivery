@@ -18,7 +18,7 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/15 * * * *"]
 
 [[r2_buckets]]
 binding = "PRODUCT_ASSETS"
