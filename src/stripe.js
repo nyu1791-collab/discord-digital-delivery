@@ -5,6 +5,7 @@ const STRIPE_API_BASE = "https://api.stripe.com/v1";
 const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 5 * 60;
 
 export async function createStripeCheckoutSession(env, product) {
+  await ensureStripeSchema(env);
   assertStripeConfig(env);
   const baseUrl = publicBaseUrl(env);
   const body = new URLSearchParams();
@@ -44,6 +45,7 @@ export async function createStripeCheckoutSession(env, product) {
 }
 
 export async function getStripeCheckoutStatus(env, sessionId) {
+  await ensureStripeSchema(env);
   if (!validSessionId(sessionId)) return json({ error: "invalid_session" }, 400);
   const order = await env.DB.prepare("SELECT * FROM stripe_checkout_sessions WHERE session_id = ?").bind(sessionId).first();
   if (!order) return json({ error: "not_found" }, 404);
@@ -63,6 +65,7 @@ export async function getStripeCheckoutStatus(env, sessionId) {
 }
 
 export async function handleStripeWebhook(request, env) {
+  await ensureStripeSchema(env);
   assertStripeConfig(env);
   const payload = await request.text();
   if (!await verifyStripeSignature(payload, request.headers.get("Stripe-Signature"), env.STRIPE_WEBHOOK_SECRET)) {
@@ -83,6 +86,7 @@ export async function handleStripeWebhook(request, env) {
 }
 
 export async function handleStripeDownload(env, url) {
+  await ensureStripeSchema(env);
   const sessionId = url.searchParams.get("session_id") ?? "";
   const expires = Number(url.searchParams.get("expires"));
   const signature = url.searchParams.get("signature") ?? "";
@@ -110,6 +114,7 @@ export async function handleStripeDownload(env, url) {
 }
 
 export async function cleanupStripeSessions(env) {
+  await ensureStripeSchema(env);
   const now = new Date().toISOString();
   await env.DB.prepare(
     "UPDATE stripe_checkout_sessions SET status = 'expired' WHERE status = 'open' AND checkout_expires_at < ?",
@@ -199,6 +204,36 @@ function publicBaseUrl(env) {
   const value = String(env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "");
   if (!/^https:\/\//.test(value)) throw new Error("PUBLIC_BASE_URL must be an HTTPS URL");
   return value;
+}
+
+let stripeSchemaPromise;
+
+async function ensureStripeSchema(env) {
+  if (!stripeSchemaPromise) {
+    stripeSchemaPromise = env.DB.batch([
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS stripe_checkout_sessions (
+        session_id TEXT PRIMARY KEY,
+        product_id TEXT NOT NULL,
+        product_title TEXT NOT NULL,
+        price_yen INTEGER NOT NULL CHECK (price_yen >= 1),
+        object_key TEXT NOT NULL,
+        download_name TEXT NOT NULL,
+        max_downloads INTEGER NOT NULL CHECK (max_downloads >= 1),
+        status TEXT NOT NULL CHECK (status IN ('open', 'paid', 'expired', 'cancelled')),
+        created_at TEXT NOT NULL,
+        checkout_expires_at TEXT NOT NULL,
+        paid_at TEXT,
+        stripe_payment_intent TEXT,
+        download_uses INTEGER NOT NULL DEFAULT 0 CHECK (download_uses >= 0),
+        last_downloaded_at TEXT
+      )`),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS stripe_checkout_sessions_status_expiry_idx ON stripe_checkout_sessions (status, checkout_expires_at)"),
+    ]).catch((error) => {
+      stripeSchemaPromise = undefined;
+      throw error;
+    });
+  }
+  await stripeSchemaPromise;
 }
 
 function validSessionId(value) {
