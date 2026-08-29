@@ -32,6 +32,10 @@ export default {
       return landingPage();
     }
 
+    if (request.method === "GET" && url.pathname === "/products") {
+      return webProductsJson(env);
+    }
+
     if (request.method === "GET" && url.pathname === "/download") {
       return handleDownload(request, env, url);
     }
@@ -191,16 +195,17 @@ async function openProductSelector(interaction, env, requestedPage = 0) {
   );
 }
 
-async function openPaymentModal(interaction, env, selectedProductId = null) {
+function openPaymentModal(interaction, env, selectedProductId = null) {
   const productId = selectedProductId ?? optionValue(interaction, "product");
-  const product = await runtimeProductById(env, productId);
-  if (!product) return ephemeral("商品が見つかりません。商品一覧からもう一度選んでください。");
+  if (!productId || (!/^r2-[0-9a-f]{8}$/i.test(String(productId)) && !findProduct(String(productId)))) {
+    return ephemeral("商品が見つかりません。販売パネルを更新して、もう一度お試しください。");
+  }
 
   return json({
     type: RESPONSE_MODAL,
     data: {
-      custom_id: `paypay-receive-link:${product.id}`,
-      title: `お支払い：${product.title}`,
+      custom_id: `paypay-receive-link:${productId}`,
+      title: "PayPay受取リンクを入力",
       components: [
         actionRow(textInput(
           "paypay_receive_link",
@@ -233,24 +238,52 @@ function createPurchasePanel() {
 async function reconcilePurchasePanel(env) {
   const channelId = String(env.SALES_CHANNEL_ID ?? "");
   if (!channelId || !env.DISCORD_BOT_TOKEN) throw new Error("Panel reconciliation is not configured");
+  const panelPayload = await createCatalogPanelPayload(env);
   const listResponse = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages?limit=100");
   if (!listResponse.ok) throw new Error("Could not read sales channel messages: HTTP " + listResponse.status);
   const messages = await listResponse.json();
   const existing = messages.find((message) =>
     (message.components || []).some((row) =>
-      (row.components || []).some((component) => component.custom_id === "purchase-panel"),
+      (row.components || []).some((component) => component.custom_id === "purchase-panel" || component.custom_id?.startsWith("product-select:")),
     ),
   );
   const response = existing
     ? await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
         method: "PATCH",
-        body: JSON.stringify(createPurchasePanelPayload().data),
+        body: JSON.stringify(panelPayload.data),
       })
     : await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
         method: "POST",
-        body: JSON.stringify(createPurchasePanelPayload().data),
+        body: JSON.stringify(panelPayload.data),
       });
   if (!response.ok) throw new Error("Could not reconcile purchase panel: HTTP " + response.status);
+}
+
+async function createCatalogPanelPayload(env) {
+  const products = await listR2Products(env);
+  const chunks = [];
+  for (let index = 0; index < products.length; index += 25) chunks.push(products.slice(index, index + 25));
+  const components = chunks.length
+    ? chunks.map((chunk, index) => actionRow({
+        type: 3,
+        custom_id: "product-select:" + index,
+        placeholder: chunks.length === 1 ? "商品を選択" : "商品を選択（" + (index + 1) + "/" + chunks.length + "）",
+        min_values: 1,
+        max_values: 1,
+        options: chunk.map((product) => ({
+          label: truncateDiscordLabel(product.title),
+          value: product.id,
+          description: formatYen(product.priceYen) + "・最大" + product.maxDownloads + "回",
+        })),
+      }))
+    : [actionRow({ type: 3, custom_id: "product-select:0", placeholder: "商品がありません", disabled: true, options: [{ label: "準備中", value: "unavailable" }] })];
+  return {
+    type: RESPONSE_CHANNEL_MESSAGE,
+    data: {
+      content: "購入する動画を下の一覧から選択してください。",
+      components,
+    },
+  };
 }
 
 async function discordApi(env, path, init = {}) {
@@ -324,33 +357,39 @@ function deferPaymentLinkSubmission(interaction, env, ctx) {
   if (!ctx?.waitUntil) return handlePaymentLinkSubmission(interaction, env);
   ctx.waitUntil(
     (async () => {
+      const buyerId = interaction.member?.user?.id ?? interaction.user?.id;
       if (!await markInteractionAsNew(interaction, env)) {
-        await editOriginalInteractionResponse(
-          interaction,
-          env,
-          ephemeral("この操作はすでに受け付け済みです。重複して注文・配布されることはありません。"),
-        );
+        await sendDiscordDm(env, buyerId, "この操作はすでに受け付け済みです。重複して注文・配布されることはありません。");
         return;
       }
       const response = await handlePaymentLinkSubmission(interaction, env);
       const payload = await response.json();
-      await editOriginalInteractionResponse(interaction, env, payload);
+      await sendDiscordDm(env, buyerId, payload.data?.content ?? "注文を受け付けました。");
     })().catch(async (error) => {
       console.error("Payment submission failed", error instanceof Error ? error.message : "unknown error");
-      try {
-        await editOriginalInteractionResponse(
-          interaction,
-          env,
-          ephemeral("決済リンクの処理に失敗しました。販売パネルからもう一度お試しください。"),
-        );
-      } catch (updateError) {
-        console.error("Payment error response update failed", updateError instanceof Error ? updateError.message : "unknown error");
+      const buyerId = interaction.member?.user?.id ?? interaction.user?.id;
+      try { await sendDiscordDm(env, buyerId, "決済リンクの処理に失敗しました。購入パネルからもう一度お試しください。"); } catch (dmError) {
+        console.error("Payment error DM failed", dmError instanceof Error ? dmError.message : "unknown error");
       }
     }),
   );
-  return json({ type: 5, data: { flags: EPHEMERAL } });
+  return ephemeral("受取リンクを受信しました。処理完了後、BotからDMで結果をお送りします。");
 }
 
+async function sendDiscordDm(env, userId, content) {
+  if (!userId) throw new Error("Missing buyer Discord ID");
+  const dm = await discordApi(env, "/users/@me/channels", {
+    method: "POST",
+    body: JSON.stringify({ recipient_id: userId }),
+  });
+  if (!dm.ok) throw new Error("Could not open buyer DM: HTTP " + dm.status);
+  const channel = await dm.json();
+  const message = await discordApi(env, "/channels/" + encodeURIComponent(channel.id) + "/messages", {
+    method: "POST",
+    body: JSON.stringify({ content: String(content).slice(0, 1900) }),
+  });
+  if (!message.ok) throw new Error("Could not send buyer DM: HTTP " + message.status);
+}
 async function handlePaymentLinkSubmission(interaction, env) {
   const customId = interaction.data?.custom_id ?? "";
   const productId = customId.startsWith("paypay-receive-link:")
@@ -404,6 +443,17 @@ async function handlePaymentLinkSubmission(interaction, env) {
       `確認期限：30分\n管理者がPayPayで受取確認後、/download order:${order.code} で受け取れます。\n` +
       "重要：リンクのパスワード・PayPayの暗証番号・ログイン情報は送らないでください。",
   );
+}
+
+async function webProductsJson(env) {
+  try {
+    const products = await listR2Products(env);
+    return new Response(JSON.stringify(products.map((product) => ({
+      id: product.id, title: product.title, priceYen: product.priceYen, maxDownloads: product.maxDownloads,
+    }))), {headers: {"Content-Type":"application/json","Cache-Control":"no-store"}});
+  } catch (error) {
+    return new Response(JSON.stringify({error:"unavailable"}), {status:503,headers: {"Content-Type":"application/json"}});
+  }
 }
 
 async function listR2Products(env) {
