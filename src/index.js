@@ -17,6 +17,10 @@ const PROCESSED_INTERACTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_PENDING_ORDERS_TO_CLEAN = 50;
 
 export default {
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(reconcilePurchasePanel(env));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -224,6 +228,29 @@ function createPurchasePanelPayload() {
 
 function createPurchasePanel() {
   return json(createPurchasePanelPayload());
+}
+
+async function reconcilePurchasePanel(env) {
+  const channelId = String(env.SALES_CHANNEL_ID ?? "");
+  if (!channelId || !env.DISCORD_BOT_TOKEN) throw new Error("Panel reconciliation is not configured");
+  const listResponse = await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages?limit=100");
+  if (!listResponse.ok) throw new Error("Could not read sales channel messages: HTTP " + listResponse.status);
+  const messages = await listResponse.json();
+  const existing = messages.find((message) =>
+    (message.components || []).some((row) =>
+      (row.components || []).some((component) => component.custom_id === "purchase-panel"),
+    ),
+  );
+  const response = existing
+    ? await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages/" + encodeURIComponent(existing.id), {
+        method: "PATCH",
+        body: JSON.stringify(createPurchasePanelPayload().data),
+      })
+    : await discordApi(env, "/channels/" + encodeURIComponent(channelId) + "/messages", {
+        method: "POST",
+        body: JSON.stringify(createPurchasePanelPayload().data),
+      });
+  if (!response.ok) throw new Error("Could not reconcile purchase panel: HTTP " + response.status);
 }
 
 async function discordApi(env, path, init = {}) {
