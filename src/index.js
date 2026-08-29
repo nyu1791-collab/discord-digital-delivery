@@ -102,6 +102,7 @@ async function handleCommand(interaction, env, ctx) {
     }
   }
   if (command === "buy" || command === "shop" || command === "panel") return handlePurchaseCommand(interaction, env, ctx, command);
+  if (command === "setup") return setupPersistentPanel(interaction, env, ctx);
   if (command === "claim") return claimPaymentLink(interaction, env);
   if (command === "approve") return approveOrder(interaction, env);
   if (command === "cancel") return cancelOrder(interaction, env);
@@ -109,6 +110,39 @@ async function handleCommand(interaction, env, ctx) {
   if (command === "status") return showOrderStatus(interaction, env);
   if (command === "download") return createDownloadLink(interaction, env);
   return ephemeral("未知のコマンドです。");
+}
+
+function setupPersistentPanel(interaction, env, ctx) {
+  const denied = requireOwner(interaction, env);
+  if (denied) return denied;
+  if (!isAllowedSalesChannel(interaction, env)) return ephemeral("販売チャンネルで実行してください。");
+  if (!ctx?.waitUntil) return ephemeral("販売チャンネルに購入パネルを設置するには、もう一度お試しください。");
+  ctx.waitUntil(
+    (async () => {
+      const response = await discordApi(env, "/channels/" + encodeURIComponent(interaction.channel_id) + "/messages", {
+        method: "POST",
+        body: JSON.stringify(createPurchasePanelPayload().data),
+      });
+      if (!response.ok) throw new Error("Discord panel message creation failed: HTTP " + response.status);
+      await editOriginalInteractionResponse(
+        interaction,
+        env,
+        ephemeral("購入パネルを設置しました。以後、購入者はこのボタンだけで購入できます。"),
+      );
+    })().catch(async (error) => {
+      console.error("Persistent panel setup failed", error instanceof Error ? error.message : "unknown error");
+      try {
+        await editOriginalInteractionResponse(
+          interaction,
+          env,
+          ephemeral("購入パネルを設置できませんでした。Botのチャンネルへの「メッセージ送信」権限を確認してください。"),
+        );
+      } catch (updateError) {
+        console.error("Panel setup error response update failed", updateError instanceof Error ? updateError.message : "unknown error");
+      }
+    }),
+  );
+  return json({ type: 5, data: { flags: EPHEMERAL } });
 }
 
 function handlePurchaseCommand(interaction, env, ctx, command) {
