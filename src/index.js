@@ -26,7 +26,15 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/healthz") {
-      if (url.searchParams.get("refresh_panel") === "1") ctx.waitUntil(reconcilePurchasePanel(env));
+      if (url.searchParams.get("refresh_panel") === "1") {
+        try {
+          await reconcilePurchasePanel(env);
+          return json({ ok: true, panel: "refreshed" });
+        } catch (error) {
+          console.error("Manual panel refresh failed", error instanceof Error ? error.message : "unknown error");
+          return json({ ok: false, panel: "not_refreshed" }, 503);
+        }
+      }
       return json({ ok: true });
     }
 
