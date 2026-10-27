@@ -53,7 +53,7 @@ for (const file of videos) {
     for(let offset=0,part=1;offset<size;offset+=partSize,part++) {
       const end=Math.min(size-1,offset+partSize-1);
       // Request only the required byte range from Drive.
-      response=await fetch("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media",{headers:{Authorization:"Bearer "+token,Range:"bytes="+offset+"-"+end}});
+      const response=await fetch("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media",{headers:{Authorization:"Bearer "+token,Range:"bytes="+offset+"-"+end}});
       if(response.status!==206 && !(response.status===200 && offset===0 && size<=partSize)) throw new Error("Drive range request failed: "+response.status);
       const body=new Uint8Array(await response.arrayBuffer());
       if(body.length!==end-offset+1) throw new Error("Unexpected Drive part length");
