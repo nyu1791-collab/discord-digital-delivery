@@ -1,6 +1,6 @@
 // 商品情報はR2の商品フォルダから読み込みます。購入者が入力した金額は信用しません。
 export const PRODUCTS = Object.freeze([
-  Object.freeze({ id: "sample-video", title: "サンプル動画", priceYen: 500, objectKey: "products/sample-video.mp4", downloadName: "sample-video.mp4", maxDownloads: 3 }),
+  Object.freeze({ id: "sample-video", title: "サンプル動画", priceYen: 300, objectKey: "products/sample-video.mp4", downloadName: "sample-video.mp4", maxDownloads: 3 }),
 ]);
 
 export function isVideoObjectKey(key) {
@@ -16,7 +16,7 @@ export function productIdForObjectKey(objectKey) {
   return `r2-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-export function productFromObject(object, priceYen = 2000, maxDownloads = 3) {
+export function productFromObject(object, priceYen = 300, maxDownloads = 3) {
   const objectKey = String(object?.key ?? "");
   if (!isVideoObjectKey(objectKey) || !Number.isSafeInteger(priceYen) || priceYen < 1) return null;
   const slash = objectKey.lastIndexOf("/");
