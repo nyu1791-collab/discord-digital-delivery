@@ -28,6 +28,7 @@ do {
   files.push(...(data.files||[])); pageToken=data.nextPageToken;
 } while (pageToken);
 const videos=files.filter(f=>videoMime.has(f.mimeType)&&selectedIds.has(f.id));
+if (apply && videos.length !== selectedIds.size) throw new Error("Some approved file IDs are absent or are not videos");
 console.log(JSON.stringify({mode:apply?"apply":"dry-run",folderId,scanned:files.length,approvedVideoCount:videos.length,unapprovedCount:files.length-videos.length},null,2));
 if (!apply) process.exit(0);
 const { S3Client, UploadPartCommand, CreateMultipartUploadCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, HeadObjectCommand } = await import("@aws-sdk/client-s3");
@@ -53,7 +54,12 @@ for (const file of videos) {
     for(let offset=0,part=1;offset<size;offset+=partSize,part++) {
       const end=Math.min(size-1,offset+partSize-1);
       // Request only the required byte range from Drive.
-      const response=await fetch("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media",{headers:{Authorization:"Bearer "+token,Range:"bytes="+offset+"-"+end}});
+      let response;
+      for (let attempt=0;attempt<3;attempt++) {
+        response=await fetch("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media",{headers:{Authorization:"Bearer "+token,Range:"bytes="+offset+"-"+end}});
+        if (response.ok || ![429,500,502,503,504].includes(response.status)) break;
+        await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
+      }
       if(response.status!==206 && !(response.status===200 && offset===0 && size<=partSize)) throw new Error("Drive range request failed: "+response.status);
       const body=new Uint8Array(await response.arrayBuffer());
       if(body.length!==end-offset+1) throw new Error("Unexpected Drive part length");
