@@ -501,7 +501,7 @@ async function listR2ProductsUncached(env) {
     const listed = await env.PRODUCT_ASSETS.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
     for (const object of listed.objects ?? []) {
       if (!isVideoObjectKey(object.key)) continue;
-      const product = productFromObject(object, 2000, 3);
+      const product = productFromObject(object, 300, 3);
       if (product) products.push(product);
     }
     if (!listed.truncated || !listed.cursor) break;
