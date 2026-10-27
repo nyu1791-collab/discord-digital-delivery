@@ -4,4 +4,4 @@ This is a **local-only** test of the ordering and delivery decision flow. It doe
 
 Run `node scripts/mock-checkout.mjs` to exercise the sample purchase and delivery receipt. Do not connect this test to the production Discord purchase panel or enable a public payment bypass.
 
-The production deployment currently fails Discord command registration with HTTP 401. Rotate `DISCORD_BOT_TOKEN` in GitHub Actions secrets (never commit it) before attempting real Discord interactions.
+The latest production deployment succeeded. If a future Discord command registration fails, inspect that specific Actions run rather than relying on historical errors.
