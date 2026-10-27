@@ -41,9 +41,12 @@ for (const file of videos) {
   const size=Number(file.size);
   if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Invalid video size");
   try {
-    await s3.send(new HeadObjectCommand({Bucket:process.env.R2_BUCKET,Key:key}));
-    console.log("Already uploaded:",key);
-    continue;
+    const existing=await s3.send(new HeadObjectCommand({Bucket:process.env.R2_BUCKET,Key:key}));
+    if (existing.ContentLength === size) {
+      console.log("Already uploaded:",key);
+      continue;
+    }
+    throw new Error("Existing R2 object has different size: "+key);
   } catch (error) {
     if (error?.$metadata?.httpStatusCode !== 404 && error?.name !== "NotFound") throw error;
   }
