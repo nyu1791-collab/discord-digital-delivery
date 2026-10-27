@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { PRODUCTS } from "../src/catalog.js";
 
 // Local-only simulation: no network, real payment, or production entitlement.
-const product = Object.freeze({ id: "sample-video", title: "サンプル動画", priceYen: 500 });
+const product = PRODUCTS.find(item => item.id === "sample-video");
+assert.ok(product);
 const order = { id: randomUUID(), productId: product.id, status: "pending", paidYen: 0, delivered: false };
 assert.equal(order.status, "pending");
 order.status = "mock_paid";
