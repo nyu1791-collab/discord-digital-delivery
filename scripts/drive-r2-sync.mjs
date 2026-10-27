@@ -30,15 +30,40 @@ do {
 const videos=files.filter(f=>videoMime.has(f.mimeType)&&selectedIds.has(f.id));
 console.log(JSON.stringify({mode:apply?"apply":"dry-run",folderId,scanned:files.length,approvedVideoCount:videos.length,unapprovedCount:files.length-videos.length},null,2));
 if (!apply) process.exit(0);
-const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
+const { S3Client, UploadPartCommand, CreateMultipartUploadCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, HeadObjectCommand } = await import("@aws-sdk/client-s3");
 const account=process.env.CLOUDFLARE_ACCOUNT_ID;
 const s3=new S3Client({region:"auto",endpoint:`https://${account}.r2.cloudflarestorage.com`,credentials:{accessKeyId:process.env.R2_ACCESS_KEY_ID,secretAccessKey:process.env.R2_SECRET_ACCESS_KEY}});
 for (const file of videos) {
   // Stable key, no raw filenames or user-supplied paths; object stays private.
   const suffix=file.mimeType==="video/quicktime"?"mov":file.mimeType==="video/webm"?"webm":file.mimeType==="video/x-matroska"?"mkv":"mp4";
   const key=prefix+createHash("sha256").update(file.id).digest("hex").slice(0,24)+"."+suffix;
-  const response=await drive("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media");
-  if (!response.body) throw new Error("Missing stream for approved file");
-  await s3.send(new PutObjectCommand({Bucket:process.env.R2_BUCKET,Key:key,Body:response.body,ContentType:file.mimeType,ContentLength:Number(file.size)}));
-  console.log("Uploaded approved video:",key);
+  const size=Number(file.size);
+  if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Invalid video size");
+  try {
+    await s3.send(new HeadObjectCommand({Bucket:process.env.R2_BUCKET,Key:key}));
+    console.log("Already uploaded:",key);
+    continue;
+  } catch (error) {
+    if (error?.$metadata?.httpStatusCode !== 404 && error?.name !== "NotFound") throw error;
+  }
+  const partSize=32*1024*1024;
+  const upload=await s3.send(new CreateMultipartUploadCommand({Bucket:process.env.R2_BUCKET,Key:key,ContentType:file.mimeType}));
+  const parts=[];
+  try {
+    for(let offset=0,part=1;offset<size;offset+=partSize,part++) {
+      const end=Math.min(size-1,offset+partSize-1);
+      // Request only the required byte range from Drive.
+      response=await fetch("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(file.id)+"?alt=media",{headers:{Authorization:"Bearer "+token,Range:"bytes="+offset+"-"+end}});
+      if(response.status!==206 && !(response.status===200 && offset===0 && size<=partSize)) throw new Error("Drive range request failed: "+response.status);
+      const body=new Uint8Array(await response.arrayBuffer());
+      if(body.length!==end-offset+1) throw new Error("Unexpected Drive part length");
+      const sent=await s3.send(new UploadPartCommand({Bucket:process.env.R2_BUCKET,Key:key,UploadId:upload.UploadId,PartNumber:part,Body:body}));
+      parts.push({ETag:sent.ETag,PartNumber:part});
+    }
+    await s3.send(new CompleteMultipartUploadCommand({Bucket:process.env.R2_BUCKET,Key:key,UploadId:upload.UploadId,MultipartUpload:{Parts:parts}}));
+    console.log("Uploaded approved video:",key);
+  } catch(error) {
+    await s3.send(new AbortMultipartUploadCommand({Bucket:process.env.R2_BUCKET,Key:key,UploadId:upload.UploadId})).catch(()=>{});
+    throw error;
+  }
 }
