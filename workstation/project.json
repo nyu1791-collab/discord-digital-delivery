@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "name": "discord-digital-delivery",
+  "kind": "cloud-worker",
+  "setup": [
+    [
+      "npm",
+      "install",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "tools": [
+    "git",
+    "node",
+    "npm"
+  ],
+  "credential_names": [],
+  "native_entry": "npm run check",
+  "package_mode": "long",
+  "production_execution": "explicit_native_command",
+  "shared_runtime": false,
+  "recommended_python": "3.12"
+}

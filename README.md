@@ -1,3 +1,5 @@
+新しいWindows PCへの導入・素材移行・投稿用素材パックは [PC移行ガイド](workstation/README.md) を参照してください。既存の制作入口とモデルは維持します。
+
 # X / PayPay 手動販売用・安全な動画配布
 
 PayPayの個人間送金を販売者が手動確認した後、Discordの管理パネルからXのDMへ送る動画リンクを即時発行するCloudflare Workerです。

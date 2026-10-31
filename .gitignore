@@ -1,0 +1,23 @@
+
+
+# PC-local optional automation state
+.venv-research/
+workstation/local.json
+workstation/*.local.json
+
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+
+__pycache__/
+
+*.pyc
+
+.venv/
+
+.ruff_cache/
+
+.pytest_cache/
