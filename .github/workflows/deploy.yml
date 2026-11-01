@@ -20,7 +20,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Verify syntax and security-focused unit tests
+      - name: Verify syntax and unit tests
         run: npm run check
 
       - name: Resolve Cloudflare account ID
