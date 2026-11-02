@@ -9,7 +9,8 @@ OWNER_DISCORD_ID = "1368150499282391093"
 SALES_GUILD_ID = "1542767815897915452"
 SALES_CHANNEL_ID = "1542767816371867690"
 # Only videos uploaded under this folder are listed as saleable products.
-PRODUCTS_PREFIX = "products/ロリ/"
+# Sales paused 2026-11-02: this folder is intentionally empty, so nothing is listed.
+PRODUCTS_PREFIX = "products/_paused/"
 
 [[d1_databases]]
 binding = "DB"
